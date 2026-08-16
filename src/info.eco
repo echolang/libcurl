@@ -1,0 +1,46 @@
+/**
+ * What can be read back off a handle after a transfer. Backed enums, one per C result type.
+ *
+ * Same split as `opt.eco`, and for the same reason: `curl_easy_getinfo` writes through the
+ * pointer it's handed, so asking a `CURLINFO_STRING` for a `long` writes an address into
+ * eight bytes of integer and answers nonsense.
+ *
+ * Read through `Easy::infoLong` / `infoString` / `infoDouble`, named per family rather
+ * than overloaded. An info has only the one argument, so a leading-dot shorthand would
+ * have nothing to disambiguate against, and a return type isn't part of a signature.
+ */
+
+namespace curl;
+
+/**
+ * Infos answering a C `long`.
+ */
+public enum LongInfo : int32
+{
+    case responseCode   = 2097154;  // CURLINFO_RESPONSE_CODE
+    case redirectCount  = 2097172;  // CURLINFO_REDIRECT_COUNT
+    case httpVersion    = 2097198;  // CURLINFO_HTTP_VERSION
+}
+
+/**
+ * Infos answering a C string. Every one may legitimately answer nothing, which is why
+ * `Easy::infoString` hands back a `string?`.
+ */
+public enum StringInfo : int32
+{
+    case effectiveUrl  = 1048577;   // CURLINFO_EFFECTIVE_URL
+    case contentType   = 1048594;   // CURLINFO_CONTENT_TYPE
+    case redirectUrl   = 1048607;   // CURLINFO_REDIRECT_URL
+    case primaryIp     = 1048608;   // CURLINFO_PRIMARY_IP
+    case scheme        = 1048625;   // CURLINFO_SCHEME
+}
+
+/**
+ * Infos answering a C `double`, all of them seconds.
+ */
+public enum DoubleInfo : int32
+{
+    case totalTime       = 3145731; // CURLINFO_TOTAL_TIME
+    case nameLookupTime  = 3145732; // CURLINFO_NAMELOOKUP_TIME
+    case connectTime     = 3145733; // CURLINFO_CONNECT_TIME
+}

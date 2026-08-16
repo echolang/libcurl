@@ -1,0 +1,79 @@
+/**
+ * Header parsing. The part of this library with real logic in it and no network.
+ */
+
+#[group: "unit"]
+test parses_a_simple_block {
+    curl::Headers $h = curl::parseHeaders("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n");
+
+    assert($h->count() == 2, 'two headers');
+    assert($h->statusLine == 'HTTP/1.1 200 OK', 'the status line is kept');
+    assert(($h->get('Content-Type') ?? '') == 'text/plain', 'content type');
+}
+
+#[group: "unit"]
+test lookup_ignores_case {
+    curl::Headers $h = curl::parseHeaders("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n");
+
+    assert($h->has('content-type'), 'lower case finds it');
+    assert($h->has('CONTENT-TYPE'), 'upper case finds it');
+    assert(!$h->has('Content-Length'), 'a header that is not there');
+}
+
+#[group: "unit"]
+test keeps_repeated_headers {
+    curl::Headers $h = curl::parseHeaders("HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n");
+
+    array<string> $cookies = $h->all('set-cookie');
+
+    assert($cookies->count() == 2, 'both cookies survive');
+    assert($cookies[0] == 'a=1', 'in arrival order');
+    assert($cookies[1] == 'b=2', 'in arrival order');
+}
+
+/**
+ * The one that matters. With redirects followed, libcurl hands back every hop concatenated,
+ * and the caller means the last one.
+ */
+#[group: "unit"]
+test the_last_block_wins {
+    string $raw = "HTTP/1.1 301 Moved\r\nLocation: /next\r\nContent-Type: text/html\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+
+    curl::Headers $h = curl::parseHeaders($raw);
+
+    assert($h->count() == 1, 'only the final block is kept');
+    assert(($h->get('Content-Type') ?? '') == 'application/json', 'the destination content type');
+    assert(!$h->has('Location'), 'the redirect header is gone');
+    assert($h->statusLine == 'HTTP/1.1 200 OK', 'the final status line');
+}
+
+#[group: "unit"]
+test folds_a_continuation_line {
+    curl::Headers $h = curl::parseHeaders("HTTP/1.1 200 OK\r\nX-Long: first\r\n  second\r\nAccept: */*\r\n");
+
+    assert($h->count() == 2, 'the continuation did not become its own header');
+    assert(($h->get('X-Long') ?? '') == 'first second', 'obs-fold is replaced with a space');
+}
+
+#[group: "unit"]
+test ignores_a_line_with_no_colon {
+    curl::Headers $h = curl::parseHeaders("HTTP/1.1 200 OK\r\ngarbage\r\nAccept: */*\r\n");
+
+    assert($h->count() == 1, 'the garbage line was dropped');
+    assert($h->has('Accept'), 'and the real one survived');
+}
+
+#[group: "unit"]
+test set_replaces_and_add_appends {
+    curl::Headers $h = curl::Headers();
+
+    $h->add('Accept', 'one');
+    $h->add('Accept', 'two');
+
+    assert($h->count() == 2, 'add keeps both');
+
+    $h->set('accept', 'three');
+
+    assert($h->count() == 1, 'set replaced every match, case-insensitively');
+    assert(($h->get('Accept') ?? '') == 'three', 'with the new value');
+}

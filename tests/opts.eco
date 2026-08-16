@@ -1,0 +1,215 @@
+/**
+ * Prepare (URL + headers) and the option stack. Pure Echo. No handle.
+ */
+
+function isLong(const curl::Opt& $opt, curl::LongOption $want, int32 $value) : bool
+{
+    int64 $wide = $value;
+
+    match ($opt) {
+        curl::Opt::long($option, $held) => {
+            if ($option != $want) {
+                return false;
+            }
+
+            if ($held != $wide) {
+                return false;
+            }
+
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+function isStr(const curl::Opt& $opt, curl::StringOption $want, const string& $value) : bool
+{
+    match ($opt) {
+        curl::Opt::text($option, $held) => {
+            if ($option != $want) {
+                return false;
+            }
+
+            if ($held != $value) {
+                return false;
+            }
+
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+function isClear(const curl::Opt& $opt, curl::StringOption $want) : bool
+{
+    match ($opt) {
+        curl::Opt::clear($option) => {
+            if ($option != $want) {
+                return false;
+            }
+
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+#[group: "unit"]
+test library_defaults_are_follow_hops_and_compression {
+    array<curl::Opt> $defaults = curl::libraryDefaults();
+
+    assert($defaults->count() == 3, 'three library defaults');
+    assert(isLong($defaults[0], curl::LongOption::followRedirects, 1), 'follow');
+    assert(isLong($defaults[1], curl::LongOption::maxRedirects, 10), 'ten hops');
+    assert(isStr($defaults[2], curl::StringOption::acceptEncoding, ''), 'ask for compression');
+}
+
+#[group: "unit"]
+test a_request_option_lands_after_the_client {
+    curl::Client $api = curl::Client();
+    $api->timeout(1000);
+    $api->userAgent('client/1');
+
+    curl::Request $req = .get('/health');
+    $req->timeout(2000);
+    $req->userAgent('request/1');
+
+    array<curl::Opt> $stack = curl::stackOpts($api->opts, $req->opts);
+
+    assert($stack->count() == 7, 'three defaults, two client, two request');
+    assert(isLong($stack[3], curl::LongOption::timeoutMs, 1000), 'client budget first');
+    assert(isStr($stack[4], curl::StringOption::userAgent, 'client/1'), 'client agent first');
+    assert(isLong($stack[5], curl::LongOption::timeoutMs, 2000), 'request budget last, so it wins');
+    assert(isStr($stack[6], curl::StringOption::userAgent, 'request/1'), 'request agent last');
+}
+
+#[group: "unit"]
+test prepare_joins_the_url_and_leaves_opts_alone {
+    curl::Client $api = curl::Client();
+    $api->baseUrl = 'https://api.example.com';
+    $api->timeout(1000);
+
+    curl::Request $req = .get('/health');
+    curl::Request $ready = curl::prepare($api, $req);
+
+    assert($ready->url == 'https://api.example.com/health', 'the path was joined');
+    assert($ready->opts->empty(), 'prepare does not copy client opts onto the request');
+}
+
+#[group: "unit"]
+test header_merge_keeps_request_duplicates {
+    curl::Client $api = curl::Client();
+    $api->header('Accept', 'text/html');
+    $api->header('X-Trace', 'client');
+
+    curl::Request $req = .get('https://example.com/');
+    $req->headers->add('X-Trace', 'one');
+    $req->headers->add('X-Trace', 'two');
+
+    curl::Request $ready = curl::prepare($api, $req);
+    array<string> $traces = $ready->headers->all('x-trace');
+
+    assert($traces->count() == 2, 'both request values survived');
+    assert($traces[0] == 'one', 'in request order');
+    assert($traces[1] == 'two', 'in request order');
+    assert(($ready->headers->get('Accept') ?? '') == 'text/html', 'an untouched default stayed');
+}
+
+#[group: "unit"]
+test fields_that_are_not_setopt_are_ordinary_writes {
+    curl::Request $req = .get('https://example.com/');
+    $req->body = 'hello';
+    $req->url = 'https://other.example/';
+
+    assert($req->body == 'hello', 'body');
+    assert($req->url == 'https://other.example/', 'url');
+}
+
+#[group: "unit"]
+test zero_is_a_real_option {
+    curl::Request $req = .get('https://example.com/');
+    $req->maxRedirects(0);
+    $req->timeout(0);
+    $req->connectTimeout(0);
+
+    assert($req->opts->count() == 3, 'three knobs');
+    assert(isLong($req->opts[0], curl::LongOption::maxRedirects, 0), 'zero hops is a cap');
+    assert(isLong($req->opts[1], curl::LongOption::timeoutMs, 0), 'a zero timeout is a timeout');
+    assert(isLong($req->opts[2], curl::LongOption::connectTimeoutMs, 0), 'a zero connect budget is a budget');
+}
+
+#[group: "unit"]
+test a_client_zero_lands_after_the_library_ten {
+    curl::Client $api = curl::Client();
+    $api->maxRedirects(0);
+    $api->timeout(0);
+
+    array<curl::Opt> $stack = curl::stackOpts($api->opts, array<curl::Opt>());
+
+    assert($stack->count() == 5, 'three defaults plus two client');
+    assert(isLong($stack[1], curl::LongOption::maxRedirects, 10), 'the library said ten');
+    assert(isLong($stack[3], curl::LongOption::maxRedirects, 0), 'the client said zero, later, so it wins');
+    assert(isLong($stack[4], curl::LongOption::timeoutMs, 0), 'and a zero budget');
+}
+
+#[group: "unit"]
+test auth_and_connect_are_options {
+    curl::Client $api = curl::Client();
+    $api->connectTimeout(250);
+    $api->auth('user', 'secret');
+
+    assert($api->opts->count() == 3, 'connect plus user plus password');
+    assert(isLong($api->opts[0], curl::LongOption::connectTimeoutMs, 250), 'connect budget');
+    assert(isStr($api->opts[1], curl::StringOption::username, 'user'), 'username');
+    assert(isStr($api->opts[2], curl::StringOption::password, 'secret'), 'password');
+}
+
+#[group: "unit"]
+test a_request_auth_is_stacked_after_the_client {
+    curl::Client $api = curl::Client();
+    $api->auth('client', 'csecret');
+
+    curl::Request $req = .get('https://example.com/');
+    $req->auth('request', 'rsecret');
+
+    array<curl::Opt> $stack = curl::stackOpts($api->opts, $req->opts);
+    usize $n = $stack->count();
+
+    assert(isStr($stack[$n - 2], curl::StringOption::username, 'request'), 'request identity last');
+    assert(isStr($stack[$n - 1], curl::StringOption::password, 'rsecret'), 'including the password');
+}
+
+#[group: "unit"]
+test verify_tls_off_is_two_options {
+    curl::Request $req = .get('https://example.com/');
+    $req->verifyTls(false);
+
+    assert($req->opts->count() == 2, 'peer and host');
+    assert(isLong($req->opts[0], curl::LongOption::verifyPeer, 0), 'peer');
+    assert(isLong($req->opts[1], curl::LongOption::verifyHost, 0), 'host');
+}
+
+#[group: "unit"]
+test accept_encoding_false_clears_the_string {
+    curl::Request $req = .get('https://example.com/');
+    $req->acceptEncoding(false);
+
+    assert($req->opts->count() == 1, 'one clear');
+    assert(isClear($req->opts[0], curl::StringOption::acceptEncoding), 'NULL, not an empty string');
+}
+
+#[group: "unit"]
+test proxy_is_just_a_string_option {
+    curl::Request $req = .get('https://example.com/');
+    $req->proxy('http://127.0.0.1:8080');
+    $req->set(.unixSocketPath, '/var/run/docker.sock');
+
+    assert(isStr($req->opts[0], curl::StringOption::proxy, 'http://127.0.0.1:8080'), 'proxy');
+    assert(isStr($req->opts[1], curl::StringOption::unixSocketPath, '/var/run/docker.sock'), 'and any other named string');
+}

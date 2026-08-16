@@ -1,0 +1,113 @@
+/**
+ * What came back.
+ *
+ * **A `Response` exists only when the transfer completed.** That's the whole point of
+ * `result<Response, Error>`. A DNS failure is an `Error`, never a `Response` with zeroes in
+ * it. A 404 is a perfectly good `Response` whose `clientError()` answers true.
+ *
+ * "Did the transfer work" and "was the server happy" are different questions. A curl wrapper
+ * that fumbles that split is not a wrapper you can trust. The types keep them apart.
+ */
+
+namespace curl;
+
+public struct Response
+{
+    /** The HTTP status. Zero when the protocol has none. `file://` doesn't. */
+    public const int64 $status;
+
+    /** The body, exactly as it arrived. A zero byte is a byte like any other. */
+    public const string $body;
+
+    /** Where the transfer actually ended up, after any redirects it followed. */
+    public const string $url;
+
+    /** Wall time for the whole transfer, in seconds. */
+    public const float64 $seconds;
+
+    /** The final hop's headers. Earlier ones aren't here. `rawHeaders` has every block. */
+    public const Headers $headers;
+
+    /** Every header block libcurl saw, status lines and all. */
+    public const string $rawHeaders;
+
+    /**
+     * 2xx.
+     */
+    const function success() : bool
+    {
+        if ($this->status < 200) {
+            return false;
+        }
+
+        if ($this->status > 299) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 3xx. Only reachable when redirects weren't being followed.
+     */
+    const function redirect() : bool
+    {
+        if ($this->status < 300) {
+            return false;
+        }
+
+        if ($this->status > 399) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 4xx. The request was wrong.
+     */
+    const function clientError() : bool
+    {
+        if ($this->status < 400) {
+            return false;
+        }
+
+        if ($this->status > 499) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 5xx. The server was wrong.
+     */
+    const function serverError() : bool
+    {
+        if ($this->status < 500) {
+            return false;
+        }
+
+        if ($this->status > 599) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * One response header, case-insensitively, or nothing.
+     */
+    const function header(const string& $name) : string?
+    {
+        return $this->headers->get($name);
+    }
+
+    /**
+     * `Content-Type` in full, media type and parameters, or nothing.
+     */
+    const function contentType() : string?
+    {
+        return $this->headers->get('Content-Type');
+    }
+}

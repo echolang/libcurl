@@ -1,0 +1,35 @@
+/**
+ * Byte-level constants the rest of the module compares against.
+ *
+ * `internal`, not `private`: the other files in this module read these, and none of them
+ * is a surface. `str::` keeps its own table private on purpose. A program spelling
+ * `str::CH_DOT` would be reading that file's implementation, so this library names the
+ * bytes it actually tests.
+ *
+ * ASCII case-insensitive comparison lives in `str::iequals`. It used to live here. It
+ * moved the moment the standard library grew the function this file had been waiting for.
+ */
+
+namespace curl;
+
+internal const uint8 CH_TAB = 9;
+internal const uint8 CH_SPACE = 32;
+internal const uint8 CH_HASH = 35;
+internal const uint8 CH_PERCENT = 37;
+internal const uint8 CH_AMPERSAND = 38;
+internal const uint8 CH_MINUS = 45;
+internal const uint8 CH_DOT = 46;
+internal const uint8 CH_SLASH = 47;
+internal const uint8 CH_ZERO = 48;
+internal const uint8 CH_NINE = 57;
+internal const uint8 CH_COLON = 58;
+internal const uint8 CH_EQUALS = 61;
+internal const uint8 CH_QUESTION = 63;
+internal const uint8 CH_UPPER_A = 65;
+internal const uint8 CH_UPPER_F = 70;
+internal const uint8 CH_UPPER_Z = 90;
+internal const uint8 CH_UNDERSCORE = 95;
+internal const uint8 CH_LOWER_A = 97;
+internal const uint8 CH_LOWER_F = 102;
+internal const uint8 CH_LOWER_Z = 122;
+internal const uint8 CH_TILDE = 126;

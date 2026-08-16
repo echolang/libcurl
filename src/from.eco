@@ -1,0 +1,23 @@
+/**
+ * `str::from` for this library's types, so `"{$e}"` works.
+ *
+ * A file of its own **because a namespace is a property of the file**. `error.eco` is
+ * `namespace curl;` and can't also be `namespace str;`. `stdlib/std/io/from.eco` exists
+ * for exactly this reason and holds exactly this much.
+ *
+ * String interpolation lowers every hole to a unary `str::from` call, minted *by name*
+ * into namespace `str`. Declaring an overload here is the whole of what a type owes
+ * to be interpolatable.
+ */
+
+namespace str;
+
+public function from(const curl::Error& $e) : string
+{
+    return $e->message();
+}
+
+public function from(const curl::Response& $r) : string
+{
+    return "{$r->status} ({$r->body->size()} bytes)";
+}

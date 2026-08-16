@@ -1,0 +1,97 @@
+/**
+ * The tests that need a network, written so that having none is not a failure.
+ *
+ * Each one gives up quietly when the transfer couldn't reach anything. A resolve or
+ * connect failure means the machine is offline, which is not this library being wrong.
+ * Everything else is asserted as normal. Real tests when you're online, silent when
+ * you're not.
+ *
+ * Run just these with `echoc test --filter group:net`.
+ */
+
+/**
+ * Did this fail only because there's nothing to talk to?
+ */
+function offline(const curl::Error& $e) : bool
+{
+    match ($e) {
+        curl::Error::couldNotResolveHost($m) => {
+            return true;
+        },
+        curl::Error::couldNotResolveProxy($m) => {
+            return true;
+        },
+        curl::Error::couldNotConnect($m) => {
+            return true;
+        },
+        curl::Error::timeout($m) => {
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+/**
+ * The regression test for the one real bug found while writing this library.
+ *
+ * A request header goes onto a `curl_slist`, and the list is handed to `CURLOPT_HTTPHEADER`
+ * through a variadic tail. Reading the pointer *bare* there passes the byte it points at
+ * instead of the pointer, and libcurl then walks a garbage address: a crash inside
+ * `Curl_checkheaders`, four runs out of five. It needs a real HTTP request, because
+ * `file://` never consults request headers.
+ */
+#[group: "net"]
+test a_request_header_survives_the_option {
+    curl::Request $req = .get('https://example.com/');
+    $req->header('X-Libcurl', 'regression');
+    $req->header('Accept', 'text/html');
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+
+    assert($res->status == 200, 'example.com answers 200');
+    assert($res->success(), 'and that is a success');
+    assert(!$res->body->empty(), 'with a body');
+}
+
+#[group: "net"]
+test reads_response_headers {
+    curl::Request $req = .get('https://example.com/');
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+
+    assert($res->headers->count() > 0, 'headers were parsed');
+    assert($res->headers->has('content-type'), 'including content-type, case-insensitively');
+    assert($res->url->starts('https://example.com'), 'the effective url came back');
+}
+
+#[group: "net"]
+test an_unresolvable_host_is_an_error {
+    curl::Request $req = .get('https://nope.invalid.libcurl/');
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'there is no such host');
+
+    curl::Error $err = $outcome->failure();
+
+    assert(!$err->message()->empty(), 'and libcurl said why');
+}

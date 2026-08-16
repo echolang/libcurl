@@ -1,0 +1,82 @@
+/**
+ * Percent-encoding and query building. Pure values, so none of this touches the network.
+ */
+
+#[group: "unit"]
+test escapes_reserved_bytes {
+    assert(curl::escape('hello') == 'hello', 'unreserved bytes survive');
+    assert(curl::escape('a b') == 'a%20b', 'a space');
+    assert(curl::escape('a/b?c=d&e') == 'a%2Fb%3Fc%3Dd%26e', 'the reserved set');
+    assert(curl::escape('-._~') == '-._~', 'the four unreserved punctuation bytes');
+}
+
+#[group: "unit"]
+test escapes_non_ascii {
+    // 'ä' is two bytes in UTF-8. each becomes its own escape
+    assert(curl::escape('ä') == '%C3%A4', 'a two byte codepoint');
+}
+
+#[group: "unit"]
+test unescape_round_trips {
+    string $original = 'a b/c?d=e&f ä';
+
+    assert(curl::unescape(curl::escape($original)) == $original, 'there and back');
+}
+
+#[group: "unit"]
+test unescape_keeps_a_lone_percent {
+    assert(curl::unescape('100%') == '100%', 'a percent with nothing after it');
+    assert(curl::unescape('%zz') == '%zz', 'a percent with no hex after it');
+    assert(curl::unescape('%2f') == '/', 'lower case hex decodes too');
+}
+
+#[group: "unit"]
+test builds_a_query_string {
+    curl::Query $q = curl::Query();
+
+    $q->add('name', 'echo lang');
+    $q->addInt('page', 2);
+
+    assert($q->count() == 2, 'two pairs');
+    assert($q->encode() == 'name=echo%20lang&page=2', 'encoded and joined');
+}
+
+#[group: "unit"]
+test an_empty_query_encodes_to_nothing {
+    curl::Query $q = curl::Query();
+
+    assert($q->empty(), 'nothing in it');
+    assert($q->encode() == '', 'and nothing out of it');
+}
+
+#[group: "unit"]
+test a_query_appends_to_a_url {
+    curl::Query $q = curl::Query();
+    $q->add('a', '1');
+
+    curl::Request $plain = .get('https://example.com/search');
+    $plain->query($q);
+
+    assert($plain->url == 'https://example.com/search?a=1', 'the first query gets a question mark');
+
+    curl::Request $already = .get('https://example.com/search?x=9');
+    $already->query($q);
+
+    assert($already->url == 'https://example.com/search?x=9&a=1', 'a second one gets an ampersand');
+}
+
+#[group: "unit"]
+test a_query_does_not_walk_into_a_fragment {
+    curl::Query $q = curl::Query();
+    $q->add('a', '1');
+
+    curl::Request $withFrag = .get('https://example.com/page#section');
+    $withFrag->query($q);
+
+    assert($withFrag->url == 'https://example.com/page?a=1#section', 'the pair lands before the fragment');
+
+    curl::Request $both = .get('https://example.com/search?x=9#frag');
+    $both->query($q);
+
+    assert($both->url == 'https://example.com/search?x=9&a=1#frag', 'and after an existing query, still before the fragment');
+}

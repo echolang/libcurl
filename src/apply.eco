@@ -1,0 +1,243 @@
+/**
+ * Prepare a Request, then poke libcurl.
+ *
+ * `send` is these functions. `prepare` is pure Echo and only does the two things that are
+ * not setopts: join the URL, merge the headers. `stackOpts` is library defaults, then the
+ * client list, then the request list. `apply` writes the HTTP bits, then loops the stack.
+ * There is no per-field inherit.
+ */
+
+namespace curl;
+
+internal function mergeHeaders(const Headers& $defaults, const Headers& $request) : Headers
+{
+    Headers $out = $defaults;
+    usize $count = $request->count();
+    usize $i = 0;
+
+    while ($i < $count) {
+        Header $held = $request->items[$i];
+
+        $out->remove($held->name);
+
+        $i = $i + 1;
+    }
+
+    $i = 0;
+
+    while ($i < $count) {
+        Header $held = $request->items[$i];
+
+        $out->add($held->name, $held->value);
+
+        $i = $i + 1;
+    }
+
+    return $out;
+}
+
+/**
+ * Follow redirects, ten hops, ask for compression. TLS stays on by not touching it.
+ */
+internal function libraryDefaults() : array<Opt>
+{
+    array<Opt> $out = array<Opt>();
+
+    $out[] = Opt::long(.followRedirects, 1);
+    $out[] = Opt::long(.maxRedirects, 10);
+    $out[] = Opt::text(.acceptEncoding, '');
+
+    return $out;
+}
+
+internal function appendOpts(array<Opt>& $into, const array<Opt>& $extra) : void
+{
+    usize $count = $extra->count();
+    usize $i = 0;
+
+    while ($i < $count) {
+        $into[] = $extra[$i];
+
+        $i = $i + 1;
+    }
+}
+
+/**
+ * Library defaults, then the client, then the request. Last write wins.
+ */
+internal function stackOpts(const array<Opt>& $client, const array<Opt>& $request) : array<Opt>
+{
+    array<Opt> $out = libraryDefaults();
+
+    appendOpts($out, $client);
+    appendOpts($out, $request);
+
+    return $out;
+}
+
+/**
+ * No client. URL and headers as the caller wrote them.
+ */
+internal function prepare(const Request& $request) : Request
+{
+    return $request;
+}
+
+/**
+ * Join the base URL, merge headers. Options stay on the two lists; `stackOpts` concatenates.
+ */
+internal function prepare(const Client& $client, const Request& $request) : Request
+{
+    Request $out = $request;
+
+    $out->url = joinUrl($client->baseUrl, $request->url);
+    $out->headers = mergeHeaders($client->headers, $request->headers);
+
+    return $out;
+}
+
+// match payload bindings are a `string`, not a `const string&`. the helper copies once
+internal function applyTextOpt(Easy& $easy, StringOption $option, string $value) : int32
+{
+    return $easy->setString($option, $value);
+}
+
+internal function applyRawStrOpt(Easy& $easy, int32 $option, string $value) : int32
+{
+    return $easy->setRaw($option, $value);
+}
+
+internal function applyRawLongOpt(Easy& $easy, int32 $option, int64 $value) : int32
+{
+    return $easy->setRaw($option, $value);
+}
+
+internal function applyOpt(Easy& $easy, const Opt& $opt) : int32
+{
+    match ($opt) {
+        Opt::long($option, $value) => {
+            return $easy->setLong($option, $value);
+        },
+        Opt::text($option, $value) => {
+            return applyTextOpt($easy, $option, $value);
+        },
+        Opt::off($option, $value) => {
+            return $easy->setOff($option, $value);
+        },
+        Opt::rawLong($option, $value) => {
+            return applyRawLongOpt($easy, $option, $value);
+        },
+        Opt::rawStr($option, $value) => {
+            return applyRawStrOpt($easy, $option, $value);
+        },
+        Opt::clear($option) => {
+            return $easy->clearString($option);
+        },
+    }
+}
+
+internal function applyOpts(Easy& $easy, const array<Opt>& $opts) : int32
+{
+    usize $count = $opts->count();
+    usize $i = 0;
+
+    while ($i < $count) {
+        int32 $code = applyOpt($easy, $opts[$i]);
+
+        if ($code != CODE_OK) {
+            return $code;
+        }
+
+        $i = $i + 1;
+    }
+
+    return CODE_OK;
+}
+
+/**
+ * Writes one Request onto a handle.
+ *
+ * Here's the catch: the body goes on before the verb. `CURLOPT_COPYPOSTFIELDS` is an alias of
+ * `POSTFIELDS` and flips the handle to POST, so a GET with a body would silently leave as POST
+ * if you asserted the verb first. HEAD becomes `noBody`, GET becomes `httpGet`, everything
+ * else becomes `customRequest`.
+ *
+ * Then the stacked options, last write wins.
+ */
+internal function apply(Easy& $easy, const Request& $request, const array<Opt>& $opts) : int32
+{
+    int32 $code = $easy->setString(.url, $request->url);
+
+    if ($code != CODE_OK) {
+        return $code;
+    }
+
+    if (!$request->body->empty()) {
+        $code = $easy->setBody($request->body);
+
+        if ($code != CODE_OK) {
+            return $code;
+        }
+    }
+
+    if ($request->method == 'HEAD') {
+        $code = $easy->setLong(.noBody, 1);
+    }
+    else if ($request->method == 'GET') {
+        $code = $easy->setLong(.httpGet, 1);
+    }
+    else {
+        $code = $easy->setString(.customRequest, $request->method);
+    }
+
+    if ($code != CODE_OK) {
+        return $code;
+    }
+
+    array<string> $lines = $request->headers->lines();
+    usize $lineCount = $lines->count();
+    usize $j = 0;
+
+    while ($j < $lineCount) {
+        $code = $easy->addHeader($lines[$j]);
+
+        if ($code != CODE_OK) {
+            return $code;
+        }
+
+        $j = $j + 1;
+    }
+
+    return applyOpts($easy, $opts);
+}
+
+internal function collect(Easy& $easy) : Response
+{
+    string $raw = $easy->rawHeaders();
+
+    return Response(
+        $easy->infoLong(.responseCode),
+        $easy->body(),
+        $easy->infoString(.effectiveUrl) ?? '',
+        $easy->infoDouble(.totalTime),
+        parseHeaders($raw),
+        $raw
+    );
+}
+
+internal function perform(Easy& $easy, const Request& $request, const array<Opt>& $opts) : result<Response, Error>
+{
+    int32 $code = apply($easy, $request, $opts);
+
+    if ($code != CODE_OK) {
+        return .error($easy->error($code));
+    }
+
+    $code = $easy->perform();
+
+    if ($code != CODE_OK) {
+        return .error($easy->error($code));
+    }
+
+    return .ok(collect($easy));
+}

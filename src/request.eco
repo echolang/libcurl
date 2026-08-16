@@ -1,0 +1,242 @@
+/**
+ * One request, as a value.
+ *
+ * **There is exactly one way to make a request in this library: build one of these and `send` it.**
+ * No parallel `curl::get($url)` / `curl::post($url, $body)` family. A second, thinner entry
+ * point per verb is surface that has to stay consistent with the first one forever, and it's
+ * the half that drifts.
+ *
+ * The convenience lives in the static constructors instead. The leading-dot shorthand reaches
+ * them, and that costs no API at all:
+ *
+ *     curl::send(.get('https://example.com/'))
+ *
+ * Echo has no named arguments. Method, URL, body, and headers are fields — they are the HTTP
+ * bits that are not a single setopt. Everything else is an `Opt` on `$opts`. Methods like
+ * `timeout` and `verifyTls` push. `$req->set(.proxy, 'http://127.0.0.1:8080')` is how a
+ * named option this type never heard of as a field still rides through `send`.
+ *
+ * No destructor, so the copy constructor stays synthesized. `$b = $a;` is an ordinary deep
+ * copy. That's what makes "one template, three variants" plain value code rather than a
+ * factory you have to remember.
+ */
+
+namespace curl;
+
+public struct Request
+{
+    /** `GET`, `POST`, ... Sent as `CURLOPT_CUSTOMREQUEST` when it isn't GET or HEAD. */
+    public string $method;
+
+    /** Absolute, or relative to a `Client`'s base URL. */
+    public string $url;
+
+    /** The request body. Sent verbatim, with its length, so a zero byte in it is just a byte. */
+    public string $body;
+
+    public Headers $headers;
+
+    /**
+     * Options, applied after the library defaults and the client's list.
+     *
+     * libcurl is last-write-wins. A later `Opt` is an override.
+     */
+    public array<Opt> $opts;
+
+    constructor(const string& $method, const string& $url)
+    {
+        $this->method = $method;
+        $this->url = $url;
+        $this->body = '';
+        $this->headers = Headers();
+        $this->opts = array<Opt>();
+    }
+
+    // ---- the verbs ------------------------------------------------------------------------------
+
+    static function get(const string& $url) : Request
+    {
+        return Request('GET', $url);
+    }
+
+    static function post(const string& $url, const string& $body) : Request
+    {
+        Request $out = Request('POST', $url);
+        $out->body = $body;
+
+        return $out;
+    }
+
+    /**
+     * A POST whose body is JSON, plus the `Content-Type` that has to go with it.
+     */
+    static function postJson(const string& $url, const string& $json) : Request
+    {
+        Request $out = Request('POST', $url);
+        $out->body = $json;
+        $out->headers->set('Content-Type', 'application/json');
+
+        return $out;
+    }
+
+    /**
+     * A POST of form fields, encoded and typed as a form.
+     */
+    static function postForm(const string& $url, const Query& $form) : Request
+    {
+        Request $out = Request('POST', $url);
+        $out->body = $form->encode();
+        $out->headers->set('Content-Type', 'application/x-www-form-urlencoded');
+
+        return $out;
+    }
+
+    static function put(const string& $url, const string& $body) : Request
+    {
+        Request $out = Request('PUT', $url);
+        $out->body = $body;
+
+        return $out;
+    }
+
+    static function patch(const string& $url, const string& $body) : Request
+    {
+        Request $out = Request('PATCH', $url);
+        $out->body = $body;
+
+        return $out;
+    }
+
+    /**
+     * `del` rather than `delete`. `delete` reads as a keyword in most of the languages nearby.
+     */
+    static function del(const string& $url) : Request
+    {
+        return Request('DELETE', $url);
+    }
+
+    /**
+     * Headers only. libcurl is told not to expect a body at all.
+     */
+    static function head(const string& $url) : Request
+    {
+        return Request('HEAD', $url);
+    }
+
+    // ---- filling one in --------------------------------------------------------------------------
+
+    /**
+     * Replaces any header of this name. `$req->headers->add(...)` if you want to keep both.
+     */
+    function header(const string& $name, const string& $value) : void
+    {
+        $this->headers->set($name, $value);
+    }
+
+    /**
+     * Appends `?a=1&b=2` to the URL, or `&a=1` when it already carries a query. Fragments stay put.
+     */
+    function query(const Query& $params) : void
+    {
+        $this->url = appendQuery($this->url, $params->encode());
+    }
+
+    function set(LongOption $option, int64 $value) : void
+    {
+        pushLong($this->opts, $option, $value);
+    }
+
+    function set(StringOption $option, const string& $value) : void
+    {
+        pushStr($this->opts, $option, $value);
+    }
+
+    function set(OffOption $option, int64 $value) : void
+    {
+        pushOff($this->opts, $option, $value);
+    }
+
+    /**
+     * An option this library hasn't named, by number. Applied last among this request's opts.
+     */
+    function raw(int32 $option, int64 $value) : void
+    {
+        pushRawLong($this->opts, $option, $value);
+    }
+
+    function raw(int32 $option, const string& $value) : void
+    {
+        pushRawStr($this->opts, $option, $value);
+    }
+
+    function timeout(int32 $ms) : void
+    {
+        int64 $wide = $ms;
+
+        pushLong($this->opts, .timeoutMs, $wide);
+    }
+
+    function connectTimeout(int32 $ms) : void
+    {
+        int64 $wide = $ms;
+
+        pushLong($this->opts, .connectTimeoutMs, $wide);
+    }
+
+    function follow(bool $on) : void
+    {
+        if ($on) {
+            pushLong($this->opts, .followRedirects, 1);
+        }
+        else {
+            pushLong($this->opts, .followRedirects, 0);
+        }
+    }
+
+    function maxRedirects(int32 $n) : void
+    {
+        int64 $wide = $n;
+
+        pushLong($this->opts, .maxRedirects, $wide);
+    }
+
+    /**
+     * Verify the peer's certificate and hostname.
+     *
+     * **Turn this off only for a known-bad host.** libcurl's own default is on; this library
+     * does not touch the knobs unless you do.
+     */
+    function verifyTls(bool $on) : void
+    {
+        pushVerifyTls($this->opts, $on);
+    }
+
+    function userAgent(const string& $agent) : void
+    {
+        pushStr($this->opts, .userAgent, $agent);
+    }
+
+    function caFile(const string& $path) : void
+    {
+        pushStr($this->opts, .caInfo, $path);
+    }
+
+    /**
+     * Ask for, and transparently decode, `gzip`/`deflate`. The library default is on.
+     * `false` clears the option so a client default does not leak onto this request.
+     */
+    function acceptEncoding(bool $on) : void
+    {
+        pushAcceptEncoding($this->opts, $on);
+    }
+
+    function auth(const string& $username, const string& $password) : void
+    {
+        pushAuth($this->opts, $username, $password);
+    }
+
+    function proxy(const string& $url) : void
+    {
+        pushStr($this->opts, .proxy, $url);
+    }
+}

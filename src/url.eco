@@ -1,0 +1,153 @@
+/**
+ * The three URL questions this library actually asks.
+ *
+ * There is no URL type. Echo has no path type either (a path is a string), and inventing
+ * one here would be a bigger design than the client. What we need is smaller: is this
+ * absolute, how does it join a base (including an origin-relative `/path`), and where
+ * do query pairs go when a fragment is already on the string.
+ *
+ * Written as predicates over bytes, not a parse-then-print. The only bug these exist to
+ * close is the one `contains('://')` / `contains('?')` would keep opening.
+ */
+
+namespace curl;
+
+/**
+ * True when `$url` begins with a scheme, `https://...`.
+ *
+ * `://` has to appear *before* any of `/`, `?`, `#`. A relative path with an absolute URL
+ * in its query (`redirect?url=https://evil.com`) is not absolute, and gluing it onto a
+ * base is what the caller asked for.
+ */
+internal function isAbsoluteUrl(const string& $url) : bool
+{
+    usize $scheme = $url->find('://');
+
+    if ($scheme >= $url->size()) {
+        return false;
+    }
+
+    usize $i = 0;
+
+    while ($i < $scheme) {
+        uint8 $b = $url->byte($i);
+
+        if ($b == CH_SLASH || $b == CH_QUESTION || $b == CH_HASH) {
+            return false;
+        }
+
+        $i = $i + 1;
+    }
+
+    return true;
+}
+
+/**
+ * Index where the authority ends: the first `/`, `?`, or `#` after `scheme://`,
+ * or the end of the string. No `://` means the whole string is not an origin.
+ */
+internal function authorityEnd(const string& $url) : usize
+{
+    usize $scheme = $url->find('://');
+
+    if ($scheme >= $url->size()) {
+        return $url->size();
+    }
+
+    usize $i = $scheme + 3;
+    usize $size = $url->size();
+
+    while ($i < $size) {
+        uint8 $b = $url->byte($i);
+
+        if ($b == CH_SLASH || $b == CH_QUESTION || $b == CH_HASH) {
+            return $i;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $size;
+}
+
+/**
+ * `$base` and `$url`, joined.
+ *
+ * An absolute URL wins. A protocol-relative one (`//cdn.example.com/x`) takes the base's
+ * scheme and nothing else of it. A path that starts with `/` replaces everything after
+ * the authority, the way a browser does — `https://api.example.com/v1` + `/health` is
+ * `https://api.example.com/health`, not `.../v1/health`. Anything else is glued on with
+ * exactly one slash. An empty base is a no-op.
+ */
+internal function joinUrl(const string& $base, const string& $url) : string
+{
+    if ($base->empty()) {
+        return $url;
+    }
+
+    if (isAbsoluteUrl($url)) {
+        return $url;
+    }
+
+    if ($url->starts('//')) {
+        usize $scheme = $base->find('://');
+
+        if ($scheme >= $base->size()) {
+            return $url;
+        }
+
+        string $prefix = $base->sub(0, $scheme + 3);
+        string $rest = $url->sub(2, $url->size() - 2);
+
+        return $prefix->concat($rest);
+    }
+
+    if ($url->starts('/')) {
+        usize $end = authorityEnd($base);
+
+        return $base->sub(0, $end)->concat($url);
+    }
+
+    if ($base->ends('/')) {
+        return $base->concat($url);
+    }
+
+    return "{$base}/{$url}";
+}
+
+/**
+ * `$encoded` (`a=1&b=2`) appended as a query, without walking into a fragment.
+ *
+ * Split on the first `#`, decide `?` vs `&` on the head alone, put the fragment back.
+ * That's the whole difference between this and `$url->contains('?')` plus an append,
+ * which is how `https://example.com/page#section` used to become `...#section?a=1`.
+ */
+internal function appendQuery(const string& $url, const string& $encoded) : string
+{
+    if ($encoded->empty()) {
+        return $url;
+    }
+
+    usize $hash = $url->find('#');
+    string $head = $url;
+    string $frag = '';
+
+    if ($hash < $url->size()) {
+        $head = $url->sub(0, $hash);
+        $frag = $url->sub($hash, $url->size() - $hash);
+    }
+
+    string $out = $head;
+
+    if ($head->contains('?')) {
+        $out->append('&');
+    }
+    else {
+        $out->append('?');
+    }
+
+    $out->append($encoded);
+    $out->append($frag);
+
+    return $out;
+}

@@ -1,0 +1,163 @@
+/**
+ * End-to-end transfers with no network and no server.
+ *
+ * curl speaks `file://`, which is enough to exercise everything that matters about the
+ * plumbing: the Echo write callback libcurl calls, the body arriving in a `string`, the
+ * `result` split between a transfer that ran and one that didn't, and the error text on
+ * the failing side.
+ *
+ * What a `file://` response *is* deserves stating, because it's a good test in itself.
+ * No headers, no HTTP status, so `$status` is zero and `success()` is false even though
+ * the transfer worked perfectly. That's exactly the distinction this library carries in
+ * the type.
+ */
+
+#[group: "unit"]
+test reads_a_file_url {
+    string $path = '/tmp/libcurl_test_body.txt';
+    string $text = 'hello from libcurl';
+
+    usize $written = guard std::io::writefile($path, $text) else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    assert($res->body == $text, 'the body came back through the callback');
+    assert($res->status == 0, 'file:// carries no HTTP status');
+    assert($res->seconds >= 0.0, 'the timing was read back');
+
+    bool $gone = guard std::io::remove($path) else ($e) {
+        die("could not clean up: {$e}");
+    }
+}
+
+#[group: "unit"]
+test a_missing_file_is_an_error_with_a_reason {
+    curl::Request $req = .get('file:///tmp/libcurl_no_such_file_here');
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'the transfer did not happen');
+
+    curl::Error $err = $outcome->failure();
+
+    assert($err->value() != 0, 'and it carries a CURLcode');
+    assert(!$err->message()->empty(), 'and a sentence to go with it');
+}
+
+#[group: "unit"]
+test an_unknown_scheme_is_refused {
+    result<curl::Response, curl::Error> $outcome = curl::send(.get('nope://example.com/'));
+
+    assert($outcome->failed(), 'libcurl does not know that scheme');
+    assert($outcome->failure()->value() == curl::CODE_UNSUPPORTED_PROTOCOL, 'and says which way');
+}
+
+/**
+ * A body large enough that libcurl hands it over in several callback invocations.
+ * A single-chunk test would never reach this.
+ */
+#[group: "unit"]
+test a_large_body_is_reassembled {
+    string $path = '/tmp/libcurl_test_large.txt';
+    string $line = 'the quick brown fox jumps over the lazy dog\n';
+    string $text = str::repeat($line, 4000);
+
+    usize $written = guard std::io::writefile($path, $text) else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    assert($res->body->size() == $text->size(), 'every chunk landed');
+    assert($res->body == $text, 'and in the right order');
+
+    bool $gone = guard std::io::remove($path) else ($e) {
+        die("could not clean up: {$e}");
+    }
+}
+
+#[group: "unit"]
+test a_client_reuses_its_handle {
+    string $path = '/tmp/libcurl_test_reuse.txt';
+
+    usize $written = guard std::io::writefile($path, 'one') else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    curl::Client $client = curl::Client();
+
+    curl::Response $first = guard $client->send(.get("file://{$path}")) else ($e) {
+        die("the first transfer failed: {$e}");
+    }
+
+    curl::Response $second = guard $client->send(.get("file://{$path}")) else ($e) {
+        die("the second transfer failed: {$e}");
+    }
+
+    assert($first->body == 'one', 'the first read');
+    assert($second->body == 'one', 'and the second, on the same handle, with no leftovers');
+
+    bool $gone = guard std::io::remove($path) else ($e) {
+        die("could not clean up: {$e}");
+    }
+}
+
+#[group: "unit"]
+test error_without_perform_does_not_walk_garbage {
+    curl::Easy $handle = curl::Easy();
+    int32 $code = $handle->setRaw(999999, 1);
+    curl::Error $err = $handle->error($code);
+
+    assert(!$err->message()->empty(), 'there is a sentence even though perform never ran');
+    assert($err->value() == curl::CODE_UNKNOWN_OPTION, 'and the code is the one setRaw answered');
+}
+
+#[group: "unit"]
+test a_raw_unknown_option_fails_send {
+    curl::Request $req = .get('file:///tmp/libcurl_unused');
+    $req->raw(999999, 1);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'send did not run the transfer');
+    assert($outcome->failure()->value() == curl::CODE_UNKNOWN_OPTION, 'and the code is the one setRaw answered');
+}
+
+#[group: "unit"]
+test a_client_raw_unknown_option_fails_send {
+    curl::Client $client = curl::Client();
+    $client->raw(999999, 1);
+
+    result<curl::Response, curl::Error> $outcome = $client->send(.get('file:///tmp/libcurl_unused'));
+
+    assert($outcome->failed(), 'send did not run the transfer');
+    assert($outcome->failure()->value() == curl::CODE_UNKNOWN_OPTION, 'and the client hatch reports it too');
+}
+
+#[group: "unit"]
+test client_raw_survives_a_reset {
+    string $path = '/tmp/libcurl_test_raw.txt';
+
+    usize $written = guard std::io::writefile($path, 'raw') else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    curl::Client $client = curl::Client();
+    $client->raw(213, 1);
+
+    curl::Response $res = guard $client->send(.get("file://{$path}")) else ($e) {
+        die("raw-then-send failed: {$e}");
+    }
+
+    assert($res->body == 'raw', 'the transfer still ran after the raw option was replayed');
+
+    bool $gone = guard std::io::remove($path) else ($e) {
+        die("could not clean up: {$e}");
+    }
+}

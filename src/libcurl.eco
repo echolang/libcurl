@@ -1,0 +1,56 @@
+/**
+ * Every C symbol this module is built out of, in one place.
+ *
+ * A file of its own because **a C symbol may only be declared once per module**. Two
+ * `extern` blocks naming `curl_easy_setopt` with signatures that disagree is a diagnostic.
+ * One place to declare a symbol is one place for that to be true. Same shape, same
+ * reasoning as `stdlib/std/io/libc.eco`.
+ *
+ * `internal`, not `private`: the other files in this module read the block, but a C
+ * symbol bound here is not a surface. A consumer who wants `curl_easy_perform` declares
+ * their own.
+ *
+ * **Types are ours to get right.** Nothing checks a declaration against the real header.
+ * There is no header to check against. The mapping this file uses:
+ *
+ *     CURL* / void*        ptr<uint8>          size_t          usize
+ *     const char*          ptr<const uint8>    long            int64
+ *     char*                ptr<uint8>          curl_off_t      int64
+ *     int / CURLcode       int32               double          float64
+ *
+ * `long` is the one that's a *platform* claim rather than a C claim. It holds on darwin
+ * and linux. It's wrong under Windows' LLP64, which is why this library doesn't target it.
+ */
+
+namespace curl;
+
+internal extern {
+    function curl_global_init    as cGlobalInit(int64 $flags) : int32;
+
+    function curl_easy_init      as cEasyInit() : ptr<uint8>;
+    function curl_easy_cleanup   as cEasyCleanup(ptr<uint8> $handle) : void;
+    function curl_easy_reset     as cEasyReset(ptr<uint8> $handle) : void;
+    function curl_easy_perform   as cPerform(ptr<uint8> $handle) : int32;
+    function curl_easy_strerror  as cStrerror(int32 $code) : ptr<const uint8>;
+
+    // **the two variadic ones.** four parameters, four arguments. the tail is the last
+    // parameter's *type*, and the list is written at the call site, so the exact-arity
+    // rule never bends. one declaration serves tails of different shapes: what each
+    // element is coerced to is C's own answer for an argument with no parameter opposite it
+    function curl_easy_setopt    as cSetopt(ptr<uint8> $handle, int32 $option, variadic_args $args) : int32;
+    function curl_easy_getinfo   as cGetinfo(ptr<uint8> $handle, int32 $info, variadic_args $args) : int32;
+
+    function curl_slist_append   as cSlistAppend(ptr<uint8> $list, ptr<const uint8> $line) : ptr<uint8>;
+    function curl_slist_free_all as cSlistFree(ptr<uint8> $list) : void;
+
+    function curl_version        as cVersion() : ptr<const uint8>;
+}
+
+// **`curl_easy_escape` is deliberately not bound.** It wants a handle it no longer uses,
+// and anything it allocates has to come back through `curl_free` rather than `mem::free`.
+// curl may be linked against a different allocator, which makes that a crash rather than
+// a leak. Percent-encoding is thirty lines of Echo (`query.eco`), and writing it here
+// keeps `Query` a pure value that needs no handle and no connection to test.
+
+// CURL_GLOBAL_SSL | CURL_GLOBAL_WIN32
+internal const int64 GLOBAL_DEFAULT = 3;

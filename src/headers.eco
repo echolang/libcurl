@@ -1,0 +1,272 @@
+/**
+ * HTTP headers, and the parser that turns a raw block into them.
+ *
+ * **An `array<Header>` with a linear scan. Not a `map<string, string>`.** A map would
+ * compile (`hash::of` covers `string`), so this is a decision, not a constraint. And
+ * every consideration agrees:
+ *
+ *  - a map hashes exact bytes, so case-insensitive lookup would allocate a lowercase
+ *    key on every insert *and* every read. `str::iequals` is the comparison we actually
+ *    want
+ *  - `Set-Cookie` legitimately repeats. A map keeps one of them
+ *  - map iteration order is unspecified. Header order is occasionally meaningful
+ *  - `map::get` asserts on a missing key, and `assert` is compiled out by `echoc build`,
+ *    so a missing header would become a garbage read in the shipped binary. `get()`
+ *    answering a `string?` has no such mode
+ *
+ * A response carries ten to thirty of these. A contiguous scan beats hashing anyway.
+ */
+
+namespace curl;
+
+/**
+ * One header, as it arrived on the wire.
+ *
+ * The fields are public, not accessor-fronted. That's a compiler limitation right now:
+ * a method call on a `const &` loop binding is rejected, but **direct field access on
+ * the borrow works**. So `foreach ($res->headers->items as const &$h) { echo $h->name; }`
+ * compiles, and an accessor-based shape wouldn't.
+ */
+public struct Header
+{
+    public string $name;
+    public string $value;
+}
+
+public struct Headers
+{
+    /** In arrival order, duplicates kept. */
+    public array<Header> $items;
+
+    /** The status line of the block these came from, `HTTP/1.1 200 OK`, or empty. */
+    public string $statusLine;
+
+    constructor()
+    {
+        $this->items = array<Header>();
+        $this->statusLine = '';
+    }
+
+    const function count() : usize
+    {
+        return $this->items->count();
+    }
+
+    const function empty() : bool
+    {
+        return $this->items->empty();
+    }
+
+    /**
+     * Appends, keeping any header of the same name that is already here.
+     */
+    function add(const string& $name, const string& $value) : void
+    {
+        $this->items[] = Header($name, $value);
+    }
+
+    /**
+     * Replaces every header of this name, or appends when there is none.
+     *
+     * Removal then append, not an in-place edit. A name that appeared three times
+     * leaves exactly one behind.
+     */
+    function set(const string& $name, const string& $value) : void
+    {
+        $this->remove($name);
+        $this->add($name, $value);
+    }
+
+    /**
+     * Drops every header of this name. Answers how many went.
+     *
+     * Walked backwards so removing one doesn't shift an element we haven't looked at
+     * yet. Edited in place rather than rebuilt into a fresh array: an owning value
+     * can't be assigned into a field.
+     */
+    function remove(const string& $name) : usize
+    {
+        usize $dropped = 0;
+        usize $i = $this->items->count();
+
+        while ($i > 0) {
+            $i = $i - 1;
+
+            if (str::iequals($this->items[$i]->name->view(), $name->view())) {
+                Header $gone = $this->items->remove($i);
+
+                $dropped = $dropped + 1;
+            }
+        }
+
+        return $dropped;
+    }
+
+    /**
+     * The first header of this name, or nothing. Case-insensitive, the way HTTP is.
+     */
+    const function get(const string& $name) : string?
+    {
+        usize $count = $this->items->count();
+        usize $i = 0;
+
+        while ($i < $count) {
+            Header $held = $this->items[$i];
+
+            if (str::iequals($held->name->view(), $name->view())) {
+                string $value = $held->value;
+
+                return $value;
+            }
+
+            $i = $i + 1;
+        }
+
+        return null;
+    }
+
+    /**
+     * Every header of this name, in arrival order. `Set-Cookie` is why this exists.
+     */
+    const function all(const string& $name) : array<string>
+    {
+        array<string> $found = array<string>();
+        usize $count = $this->items->count();
+        usize $i = 0;
+
+        while ($i < $count) {
+            Header $held = $this->items[$i];
+
+            if (str::iequals($held->name->view(), $name->view())) {
+                $found[] = $held->value;
+            }
+
+            $i = $i + 1;
+        }
+
+        return $found;
+    }
+
+    const function has(const string& $name) : bool
+    {
+        if ($this->get($name) == null) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function clear() : void
+    {
+        $this->items->clear();
+        $this->statusLine->clear();
+    }
+
+    /**
+     * `Name: value` lines, in order. What a request hands to libcurl.
+     */
+    const function lines() : array<string>
+    {
+        array<string> $out = array<string>();
+        usize $count = $this->items->count();
+        usize $i = 0;
+
+        while ($i < $count) {
+            Header $held = $this->items[$i];
+
+            $out[] = "{$held->name}: {$held->value}";
+
+            $i = $i + 1;
+        }
+
+        return $out;
+    }
+}
+
+/**
+ * A raw response header block, parsed.
+ *
+ * Two subtleties. That's the whole reason this isn't a three-line split:
+ *
+ *  - **a line beginning `HTTP/` starts a new block and discards what came before it.**
+ *    With redirects following, libcurl hands back every hop's headers concatenated,
+ *    and the caller means the final response. Miss this and you read the redirect's
+ *    `Content-Type` instead of the destination's. Classic wrapper bug.
+ *  - a line beginning with a space or a tab is an obsolete folded continuation. It
+ *    belongs to the header above it, not to a header of its own.
+ *
+ * The status *number* is never parsed out of the status line. `CURLINFO_RESPONSE_CODE`
+ * already knows it, and it has resolved the redirect chain. The line is kept for its
+ * reason phrase.
+ */
+public function parseHeaders(const string& $raw) : Headers
+{
+    Headers $out = Headers();
+
+    array<string> $lines = str::split($raw, '\n');
+    usize $count = $lines->count();
+
+    string $pendingName = '';
+    string $pendingValue = '';
+    bool $pending = false;
+
+    usize $i = 0;
+
+    while ($i < $count) {
+        // rtrim, not trim: a leading space is what marks a continuation, so it has to
+        // survive long enough to be read
+        string $line = str::rtrim($lines[$i]);
+
+        $i = $i + 1;
+
+        if ($line->empty()) {
+            continue;
+        }
+
+        if ($line->starts('HTTP/')) {
+            if ($pending) {
+                $out->add($pendingName, $pendingValue);
+                $pending = false;
+            }
+
+            $out->clear();
+            $out->statusLine = $line;
+
+            continue;
+        }
+
+        uint8 $first = $line->byte(0);
+
+        if ($first == CH_SPACE || $first == CH_TAB) {
+            if ($pending) {
+                string $folded = str::trim($line);
+
+                $pendingValue = "{$pendingValue} {$folded}";
+            }
+
+            continue;
+        }
+
+        if ($pending) {
+            $out->add($pendingName, $pendingValue);
+            $pending = false;
+        }
+
+        usize $at = $line->find(':');
+
+        // a line with no colon isn't a header. dropped, not stored under an empty name
+        if ($at >= $line->size()) {
+            continue;
+        }
+
+        $pendingName = str::trim($line->sub(0, $at));
+        $pendingValue = str::trim($line->sub($at + 1, $line->size() - $at - 1));
+        $pending = true;
+    }
+
+    if ($pending) {
+        $out->add($pendingName, $pendingValue);
+    }
+
+    return $out;
+}

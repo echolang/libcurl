@@ -1,0 +1,47 @@
+/**
+ * URL join and query append. The part of this library with real string logic and no
+ * libcurl. Internal, and tests share the module, so they call the functions by name.
+ */
+
+#[group: "unit"]
+test an_absolute_url_has_a_scheme_at_the_start {
+    assert(curl::isAbsoluteUrl('https://example.com/'), 'a scheme');
+    assert(curl::isAbsoluteUrl('http://example.com'), 'http too');
+    assert(!curl::isAbsoluteUrl('/health'), 'a path is not');
+    assert(!curl::isAbsoluteUrl('health'), 'nor a relative segment');
+    assert(!curl::isAbsoluteUrl('redirect?url=https://evil.com'), ':// in a query is not a scheme');
+    assert(!curl::isAbsoluteUrl('page#https://x'), ':// in a fragment is not a scheme');
+}
+
+#[group: "unit"]
+test join_leaves_an_absolute_url_alone {
+    assert(curl::joinUrl('https://api.example.com', 'https://other.example/x') == 'https://other.example/x', 'absolute wins');
+    assert(curl::joinUrl('https://api.example.com', 'redirect?url=https://evil.com') == 'https://api.example.com/redirect?url=https://evil.com', 'a query :// still joins');
+}
+
+#[group: "unit"]
+test join_puts_exactly_one_slash {
+    assert(curl::joinUrl('https://api.example.com', '/health') == 'https://api.example.com/health', 'base with no slash, url with one');
+    assert(curl::joinUrl('https://api.example.com/', 'health') == 'https://api.example.com/health', 'base with a slash, url with none');
+    assert(curl::joinUrl('https://api.example.com/', '/health') == 'https://api.example.com/health', 'both, one survives');
+    assert(curl::joinUrl('https://api.example.com', 'health') == 'https://api.example.com/health', 'neither, one is added');
+}
+
+#[group: "unit"]
+test join_replaces_the_path_when_the_url_is_absolute {
+    assert(curl::joinUrl('https://api.example.com/v1', '/health') == 'https://api.example.com/health', 'a path-bearing base drops its path');
+    assert(curl::joinUrl('https://api.example.com/v1/', '/health') == 'https://api.example.com/health', 'a trailing slash on the base does not keep the path');
+    assert(curl::joinUrl('https://api.example.com/v1/users', '/health') == 'https://api.example.com/health', 'deeper paths go too');
+    assert(curl::joinUrl('https://api.example.com/v1?x=1', '/health') == 'https://api.example.com/health', 'the base query does not survive an absolute path');
+}
+
+#[group: "unit"]
+test join_rewrites_a_protocol_relative_url {
+    assert(curl::joinUrl('https://api.example.com/v1', '//cdn.example.com/x') == 'https://cdn.example.com/x', 'the base scheme, not the base path');
+    assert(curl::joinUrl('http://api.example.com', '//cdn.example.com/x') == 'http://cdn.example.com/x', 'http stays http');
+}
+
+#[group: "unit"]
+test join_with_no_base_is_the_url {
+    assert(curl::joinUrl('', '/health') == '/health', 'nothing to join to');
+}

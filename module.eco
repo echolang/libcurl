@@ -1,0 +1,18 @@
+/*
+ * An HTTP client for Echo, sitting on the C library of the same name.
+ */
+
+#[module: "libcurl"]
+#[version: "0.1.0"]
+
+// three places: the executable's link line under `build`, and a `dlopen` of libcurl before
+// the JIT starts under `run`. where libcurl lives is the machine's problem, not this file's.
+// `echoc build --link search:/opt/homebrew/opt/curl/lib` is how you point at it
+#[link: lib "curl"]
+
+#[sources: "src/*.eco"]
+
+// `echoc test` compiles this.
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

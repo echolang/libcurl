@@ -1,0 +1,234 @@
+/**
+ * Percent-encoding, and the key/value pairs built on it.
+ *
+ * **Written in Echo, not through `curl_easy_escape`**, which wants a handle it no longer
+ * uses. Doing it here keeps `Query` a pure value: encoding a form needs no handle, no
+ * connection, and no libcurl at all. That's what lets it be tested without touching the
+ * network.
+ *
+ * Unreserved is RFC 3986's set (`A-Z a-z 0-9 - . _ ~`). Everything else becomes `%XX`
+ * with upper-case hex digits.
+ */
+
+namespace curl;
+
+private const HEX_DIGITS = '0123456789ABCDEF';
+
+/**
+ * Is this byte one RFC 3986 leaves alone?
+ */
+private function unreserved(uint8 $b) : bool
+{
+    int32 $wide = $b;
+
+    if ($wide >= CH_UPPER_A) {
+        if ($wide <= CH_UPPER_Z) {
+            return true;
+        }
+    }
+
+    if ($wide >= CH_LOWER_A) {
+        if ($wide <= CH_LOWER_Z) {
+            return true;
+        }
+    }
+
+    if ($wide >= CH_ZERO) {
+        if ($wide <= CH_NINE) {
+            return true;
+        }
+    }
+
+    if ($b == CH_MINUS || $b == CH_DOT) {
+        return true;
+    }
+
+    if ($b == CH_UNDERSCORE || $b == CH_TILDE) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * The value of a hex digit byte, or -1 when it isn't one.
+ */
+private function hexValue(uint8 $b) : int32
+{
+    int32 $wide = $b;
+
+    if ($wide >= CH_ZERO) {
+        if ($wide <= CH_NINE) {
+            return $wide - CH_ZERO;
+        }
+    }
+
+    if ($wide >= CH_UPPER_A) {
+        if ($wide <= CH_UPPER_F) {
+            return $wide - CH_UPPER_A + 10;
+        }
+    }
+
+    if ($wide >= CH_LOWER_A) {
+        if ($wide <= CH_LOWER_F) {
+            return $wide - CH_LOWER_A + 10;
+        }
+    }
+
+    return -1;
+}
+
+/**
+ * `$text` with everything outside the unreserved set percent-encoded.
+ *
+ * Binary safe. A zero byte encodes to `%00` like any other.
+ */
+public function escape(const string& $text) : string
+{
+    string $hex = HEX_DIGITS;
+    string $out = '';
+
+    usize $size = $text->size();
+
+    // one allocation for the common case, where most bytes survive as themselves
+    $out->reserve($size);
+
+    usize $i = 0;
+
+    while ($i < $size) {
+        uint8 $b = $text->byte($i);
+
+        if (unreserved($b)) {
+            $out->push($b);
+        }
+        else {
+            int32 $wide = $b;
+
+            $out->push(CH_PERCENT);
+            $out->push($hex->byte($wide / 16));
+            $out->push($hex->byte($wide % 16));
+        }
+
+        $i = $i + 1;
+    }
+
+    return $out;
+}
+
+/**
+ * The other direction. A `%` that isn't followed by two hex digits is kept as written.
+ * That's the forgiving reading every browser takes.
+ */
+public function unescape(const string& $text) : string
+{
+    string $out = '';
+    usize $size = $text->size();
+
+    $out->reserve($size);
+
+    usize $i = 0;
+
+    while ($i < $size) {
+        uint8 $b = $text->byte($i);
+
+        if ($b != CH_PERCENT || $i + 2 >= $size) {
+            $out->push($b);
+            $i = $i + 1;
+            continue;
+        }
+
+        int32 $hi = hexValue($text->byte($i + 1));
+        int32 $lo = hexValue($text->byte($i + 2));
+
+        if ($hi < 0 || $lo < 0) {
+            $out->push($b);
+            $i = $i + 1;
+            continue;
+        }
+
+        uint8 $decoded = $hi * 16 + $lo;
+
+        $out->push($decoded);
+        $i = $i + 3;
+    }
+
+    return $out;
+}
+
+/**
+ * One name/value pair, as a form field or a query parameter.
+ *
+ * Not a `Header`. A header is "one field as it arrived on the wire". These are just two
+ * strings, and coupling them to the HTTP type would make a future Header change a Query
+ * change for no shared behaviour at all.
+ */
+public struct Field
+{
+    public string $name;
+    public string $value;
+}
+
+/**
+ * Name/value pairs that render as `a=1&b=2`, percent-encoded.
+ *
+ * Same type, two jobs: a query string on a URL, and an
+ * `application/x-www-form-urlencoded` request body. `Request::postForm` is the second one.
+ */
+public struct Query
+{
+    public array<Field> $pairs;
+
+    constructor()
+    {
+        $this->pairs = array<Field>();
+    }
+
+    function add(const string& $name, const string& $value) : void
+    {
+        $this->pairs[] = Field($name, $value);
+    }
+
+    /**
+     * A numeric parameter, so you don't have to reach for `str::from` first.
+     */
+    function addInt(const string& $name, int64 $value) : void
+    {
+        $this->pairs[] = Field($name, str::from($value));
+    }
+
+    const function count() : usize
+    {
+        return $this->pairs->count();
+    }
+
+    const function empty() : bool
+    {
+        return $this->pairs->empty();
+    }
+
+    /**
+     * `a=1&b=2`, or empty when there's nothing to render.
+     */
+    const function encode() : string
+    {
+        string $out = '';
+        usize $count = $this->pairs->count();
+        usize $i = 0;
+
+        while ($i < $count) {
+            Field $pair = $this->pairs[$i];
+
+            if ($i > 0) {
+                $out->push(CH_AMPERSAND);
+            }
+
+            $out->append(escape($pair->name));
+            $out->push(CH_EQUALS);
+            $out->append(escape($pair->value));
+
+            $i = $i + 1;
+        }
+
+        return $out;
+    }
+}

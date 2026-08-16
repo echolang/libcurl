@@ -1,0 +1,156 @@
+/**
+ * The curl options this library names. Backed enums, one per C value type.
+ *
+ * An enum rather than a pile of `const int32`s because of how the call site reads. The
+ * leading-dot shorthand takes the type from the parameter, so an option is written
+ * `.followRedirects` and never qualified. `std::io` makes the same call with `filemode`
+ * and `file::open($path, .read)`.
+ *
+ * **One enum per C type is what makes the value safe.** A variadic tail element keeps its
+ * own type, and there's no destination to type a literal against, so `cSetopt($h, 52, [1])`
+ * would place a four-byte `int32` where C reads an eight-byte `long`. That's the oldest
+ * bug in every curl binding. Going through `Easy::setLong` widens the value before the
+ * list is built, so the mistake is unreachable rather than merely discouraged.
+ *
+ * The number on each case is curl's, frozen ABI, with the C name beside it so a line can
+ * be checked against `curl.h` at a glance. An option we haven't named yet is reachable
+ * through `Easy::setRaw`, which is why this enum being closed costs nothing.
+ */
+
+namespace curl;
+
+/**
+ * Options whose value is a C `long`. Written through `Easy::set(LongOption, int64)`.
+ */
+public enum LongOption : int32
+{
+    case verbose           = 41;    // CURLOPT_VERBOSE
+    case noBody            = 44;    // CURLOPT_NOBODY
+    case failOnError       = 45;    // CURLOPT_FAILONERROR
+    case upload            = 46;    // CURLOPT_UPLOAD
+    case post              = 47;    // CURLOPT_POST
+    case followRedirects   = 52;    // CURLOPT_FOLLOWLOCATION
+    case verifyPeer        = 64;    // CURLOPT_SSL_VERIFYPEER
+    case maxRedirects      = 68;    // CURLOPT_MAXREDIRS
+    case httpGet           = 80;    // CURLOPT_HTTPGET
+    case verifyHost        = 81;    // CURLOPT_SSL_VERIFYHOST
+    case noSignal          = 99;    // CURLOPT_NOSIGNAL
+    case httpAuth          = 107;   // CURLOPT_HTTPAUTH
+    case timeoutMs         = 155;   // CURLOPT_TIMEOUT_MS
+    case connectTimeoutMs  = 156;   // CURLOPT_CONNECTTIMEOUT_MS
+    case tcpKeepAlive      = 213;   // CURLOPT_TCP_KEEPALIVE
+}
+
+/**
+ * Options whose value is a C string. Written through `Easy::set(StringOption, const string&)`.
+ */
+public enum StringOption : int32
+{
+    case url             = 10002;   // CURLOPT_URL
+    case proxy           = 10004;   // CURLOPT_PROXY
+    case referer         = 10016;   // CURLOPT_REFERER
+    case userAgent       = 10018;   // CURLOPT_USERAGENT
+    case cookie          = 10022;   // CURLOPT_COOKIE
+    case customRequest   = 10036;   // CURLOPT_CUSTOMREQUEST
+    case caInfo          = 10065;   // CURLOPT_CAINFO
+    case caPath          = 10097;   // CURLOPT_CAPATH
+    case acceptEncoding  = 10102;   // CURLOPT_ACCEPT_ENCODING
+    case username        = 10173;   // CURLOPT_USERNAME
+    case password        = 10174;   // CURLOPT_PASSWORD
+    case unixSocketPath  = 10231;   // CURLOPT_UNIX_SOCKET_PATH
+}
+
+/**
+ * Options whose value is a `curl_off_t`. Written through `Easy::set(OffOption, int64)`.
+ *
+ * Separate from `LongOption` even though both arrive as `int64`. They're different C types,
+ * and `curl_easy_setopt` accepts the wrong one silently.
+ */
+public enum OffOption : int32
+{
+    case maxFileSize    = 30117;    // CURLOPT_MAXFILESIZE_LARGE
+    case postFieldSize  = 30120;    // CURLOPT_POSTFIELDSIZE_LARGE
+}
+
+// the options this library sets itself, by number. plumbing, not surface. naming them in
+// the enums above would invite a caller to fight `Easy` for the handle
+internal const int32 OPT_WRITEDATA      = 10001;    // CURLOPT_WRITEDATA
+internal const int32 OPT_ERRORBUFFER    = 10010;    // CURLOPT_ERRORBUFFER
+internal const int32 OPT_HTTPHEADER     = 10023;    // CURLOPT_HTTPHEADER
+internal const int32 OPT_HEADERDATA     = 10029;    // CURLOPT_HEADERDATA
+internal const int32 OPT_COPYPOSTFIELDS = 10165;    // CURLOPT_COPYPOSTFIELDS
+internal const int32 OPT_WRITEFUNCTION  = 20011;    // CURLOPT_WRITEFUNCTION
+internal const int32 OPT_HEADERFUNCTION = 20079;    // CURLOPT_HEADERFUNCTION
+
+/**
+ * One setopt, as a value. This is the option language.
+ *
+ * A `Request` is method, URL, body, headers, and a list of these. `Client` holds the same
+ * list as defaults. `send` writes library defaults, then the client's list, then the
+ * request's. libcurl is last-write-wins, so a later `Opt` is an override, not a merge.
+ *
+ * `clear` passes a NULL pointer, which is how you undo a string option the defaults
+ * already set — `acceptEncoding(false)` after the library asked for compression.
+ */
+public enum Opt
+{
+    case long(LongOption $option, int64 $value);
+    case text(StringOption $option, string $value);
+    case off(OffOption $option, int64 $value);
+    case rawLong(int32 $option, int64 $value);
+    case rawStr(int32 $option, string $value);
+    case clear(StringOption $option);
+}
+
+internal function pushLong(array<Opt>& $opts, LongOption $option, int64 $value) : void
+{
+    $opts[] = Opt::long($option, $value);
+}
+
+internal function pushStr(array<Opt>& $opts, StringOption $option, const string& $value) : void
+{
+    $opts[] = Opt::text($option, $value);
+}
+
+internal function pushOff(array<Opt>& $opts, OffOption $option, int64 $value) : void
+{
+    $opts[] = Opt::off($option, $value);
+}
+
+internal function pushRawLong(array<Opt>& $opts, int32 $option, int64 $value) : void
+{
+    $opts[] = Opt::rawLong($option, $value);
+}
+
+internal function pushRawStr(array<Opt>& $opts, int32 $option, const string& $value) : void
+{
+    $opts[] = Opt::rawStr($option, $value);
+}
+
+internal function pushVerifyTls(array<Opt>& $opts, bool $on) : void
+{
+    if ($on) {
+        $opts[] = Opt::long(.verifyPeer, 1);
+        $opts[] = Opt::long(.verifyHost, 2);
+    }
+    else {
+        $opts[] = Opt::long(.verifyPeer, 0);
+        $opts[] = Opt::long(.verifyHost, 0);
+    }
+}
+
+internal function pushAcceptEncoding(array<Opt>& $opts, bool $on) : void
+{
+    if ($on) {
+        $opts[] = Opt::text(.acceptEncoding, '');
+    }
+    else {
+        $opts[] = Opt::clear(.acceptEncoding);
+    }
+}
+
+internal function pushAuth(array<Opt>& $opts, const string& $username, const string& $password) : void
+{
+    $opts[] = Opt::text(.username, $username);
+    $opts[] = Opt::text(.password, $password);
+}

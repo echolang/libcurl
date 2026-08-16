@@ -1,0 +1,71 @@
+/**
+ * Error as an enum: from a CURLcode, back out as a number, the leftover case.
+ */
+
+function isTimeout(const curl::Error& $e) : bool
+{
+    match ($e) {
+        curl::Error::timeout($m) => {
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+function otherCode(const curl::Error& $e) : int32
+{
+    match ($e) {
+        curl::Error::other($code, $m) => {
+            return $code;
+        },
+        else => {
+            return -1;
+        },
+    }
+}
+
+#[group: "unit"]
+test from_maps_a_named_code {
+    curl::Error $e = curl::Error::from(curl::CODE_OPERATION_TIMEDOUT, 'ran out of time');
+
+    assert(isTimeout($e), '28 is timeout');
+    assert($e->value() == curl::CODE_OPERATION_TIMEDOUT, 'and the ABI number comes back');
+    assert($e->message() == 'ran out of time', 'the sentence is kept');
+}
+
+#[group: "unit"]
+test from_keeps_an_unknown_code {
+    curl::Error $e = curl::Error::from(999, 'mystery');
+
+    assert(otherCode($e) == 999, 'an unmapped number is other, with the number C handed us');
+    assert($e->value() == 999, 'value() is that same number');
+    assert($e->message() == 'mystery', 'with the sentence');
+}
+
+#[group: "unit"]
+test from_round_trips_every_named_code {
+    assert(curl::Error::from(curl::CODE_UNSUPPORTED_PROTOCOL, 'x')->value() == curl::CODE_UNSUPPORTED_PROTOCOL, 'unsupported');
+    assert(curl::Error::from(curl::CODE_FAILED_INIT, 'x')->value() == curl::CODE_FAILED_INIT, 'init');
+    assert(curl::Error::from(curl::CODE_URL_MALFORMAT, 'x')->value() == curl::CODE_URL_MALFORMAT, 'url');
+    assert(curl::Error::from(curl::CODE_COULDNT_RESOLVE_PROXY, 'x')->value() == curl::CODE_COULDNT_RESOLVE_PROXY, 'proxy');
+    assert(curl::Error::from(curl::CODE_COULDNT_RESOLVE_HOST, 'x')->value() == curl::CODE_COULDNT_RESOLVE_HOST, 'host');
+    assert(curl::Error::from(curl::CODE_COULDNT_CONNECT, 'x')->value() == curl::CODE_COULDNT_CONNECT, 'connect');
+    assert(curl::Error::from(curl::CODE_HTTP_RETURNED_ERROR, 'x')->value() == curl::CODE_HTTP_RETURNED_ERROR, 'http');
+    assert(curl::Error::from(curl::CODE_WRITE_ERROR, 'x')->value() == curl::CODE_WRITE_ERROR, 'write');
+    assert(curl::Error::from(curl::CODE_OUT_OF_MEMORY, 'x')->value() == curl::CODE_OUT_OF_MEMORY, 'oom');
+    assert(curl::Error::from(curl::CODE_OPERATION_TIMEDOUT, 'x')->value() == curl::CODE_OPERATION_TIMEDOUT, 'timeout');
+    assert(curl::Error::from(curl::CODE_SSL_CONNECT_ERROR, 'x')->value() == curl::CODE_SSL_CONNECT_ERROR, 'ssl');
+    assert(curl::Error::from(curl::CODE_FILE_COULDNT_READ_FILE, 'x')->value() == curl::CODE_FILE_COULDNT_READ_FILE, 'file');
+    assert(curl::Error::from(curl::CODE_TOO_MANY_REDIRECTS, 'x')->value() == curl::CODE_TOO_MANY_REDIRECTS, 'redirects');
+    assert(curl::Error::from(curl::CODE_UNKNOWN_OPTION, 'x')->value() == curl::CODE_UNKNOWN_OPTION, 'option');
+    assert(curl::Error::from(curl::CODE_PEER_FAILED_VERIFICATION, 'x')->value() == curl::CODE_PEER_FAILED_VERIFICATION, 'peer');
+}
+
+#[group: "unit"]
+test interpolating_an_error_is_the_sentence {
+    curl::Error $e = curl::Error::timeout('ran out of time');
+
+    assert("{$e}" == 'ran out of time', 'str::from reads the message');
+}

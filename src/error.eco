@@ -1,0 +1,179 @@
+/**
+ * Why a transfer didn't happen.
+ *
+ * An enum, so `guard` / `match` is the call site:
+ *
+ *     guard curl::send(.get($url)) else ($e) {
+ *         match ($e) {
+ *             .timeout($m) => { ... },
+ *             else => { die("{$e}"); },
+ *         }
+ *     }
+ *
+ * Named cases are the CURLcodes this library publishes. `other` is a newer libcurl, or a
+ * protocol we don't wrap. Echo has no "enum from a raw value", and a backed enum cannot
+ * also carry a leftover integer, so this is a classifier: `from` maps inbound C, `value`
+ * hands the ABI number back out.
+ *
+ * Every case carries libcurl's sentence. `str::from` is in `from.eco`, so `"{$e}"` renders
+ * it and `die("request failed: {$e}")` reads as the sentence it is.
+ */
+
+namespace curl;
+
+public enum Error
+{
+    case unsupportedProtocol(string $message);
+    case failedInit(string $message);
+    case urlMalformat(string $message);
+    case couldNotResolveProxy(string $message);
+    case couldNotResolveHost(string $message);
+    case couldNotConnect(string $message);
+    case httpReturnedError(string $message);
+    case writeError(string $message);
+    case outOfMemory(string $message);
+    case timeout(string $message);
+    case sslConnectError(string $message);
+    case fileCouldNotReadFile(string $message);
+    case tooManyRedirects(string $message);
+    case unknownOption(string $message);
+    case peerFailedVerification(string $message);
+    case other(int32 $code, string $message);
+
+    /**
+     * The case that goes with a CURLcode. Unknown numbers become `other`.
+     */
+    static function from(int32 $n, const string& $message) : Error
+    {
+        if ($n == CODE_UNSUPPORTED_PROTOCOL) {
+            return Error::unsupportedProtocol($message);
+        }
+
+        if ($n == CODE_FAILED_INIT) {
+            return Error::failedInit($message);
+        }
+
+        if ($n == CODE_URL_MALFORMAT) {
+            return Error::urlMalformat($message);
+        }
+
+        if ($n == CODE_COULDNT_RESOLVE_PROXY) {
+            return Error::couldNotResolveProxy($message);
+        }
+
+        if ($n == CODE_COULDNT_RESOLVE_HOST) {
+            return Error::couldNotResolveHost($message);
+        }
+
+        if ($n == CODE_COULDNT_CONNECT) {
+            return Error::couldNotConnect($message);
+        }
+
+        if ($n == CODE_HTTP_RETURNED_ERROR) {
+            return Error::httpReturnedError($message);
+        }
+
+        if ($n == CODE_WRITE_ERROR) {
+            return Error::writeError($message);
+        }
+
+        if ($n == CODE_OUT_OF_MEMORY) {
+            return Error::outOfMemory($message);
+        }
+
+        if ($n == CODE_OPERATION_TIMEDOUT) {
+            return Error::timeout($message);
+        }
+
+        if ($n == CODE_SSL_CONNECT_ERROR) {
+            return Error::sslConnectError($message);
+        }
+
+        if ($n == CODE_FILE_COULDNT_READ_FILE) {
+            return Error::fileCouldNotReadFile($message);
+        }
+
+        if ($n == CODE_TOO_MANY_REDIRECTS) {
+            return Error::tooManyRedirects($message);
+        }
+
+        if ($n == CODE_UNKNOWN_OPTION) {
+            return Error::unknownOption($message);
+        }
+
+        if ($n == CODE_PEER_FAILED_VERIFICATION) {
+            return Error::peerFailedVerification($message);
+        }
+
+        return Error::other($n, $message);
+    }
+
+    /**
+     * The CURLcode. `other` returns the number C handed us.
+     */
+    const function value() : int32
+    {
+        return match ($this) {
+            Error::unsupportedProtocol($message) => CODE_UNSUPPORTED_PROTOCOL,
+            Error::failedInit($message) => CODE_FAILED_INIT,
+            Error::urlMalformat($message) => CODE_URL_MALFORMAT,
+            Error::couldNotResolveProxy($message) => CODE_COULDNT_RESOLVE_PROXY,
+            Error::couldNotResolveHost($message) => CODE_COULDNT_RESOLVE_HOST,
+            Error::couldNotConnect($message) => CODE_COULDNT_CONNECT,
+            Error::httpReturnedError($message) => CODE_HTTP_RETURNED_ERROR,
+            Error::writeError($message) => CODE_WRITE_ERROR,
+            Error::outOfMemory($message) => CODE_OUT_OF_MEMORY,
+            Error::timeout($message) => CODE_OPERATION_TIMEDOUT,
+            Error::sslConnectError($message) => CODE_SSL_CONNECT_ERROR,
+            Error::fileCouldNotReadFile($message) => CODE_FILE_COULDNT_READ_FILE,
+            Error::tooManyRedirects($message) => CODE_TOO_MANY_REDIRECTS,
+            Error::unknownOption($message) => CODE_UNKNOWN_OPTION,
+            Error::peerFailedVerification($message) => CODE_PEER_FAILED_VERIFICATION,
+            Error::other($code, $message) => $code,
+        };
+    }
+
+    /**
+     * What went wrong, in words. `CURLOPT_ERRORBUFFER` when libcurl filled it.
+     */
+    const function message() : string
+    {
+        return match ($this) {
+            Error::unsupportedProtocol($message) => $message,
+            Error::failedInit($message) => $message,
+            Error::urlMalformat($message) => $message,
+            Error::couldNotResolveProxy($message) => $message,
+            Error::couldNotResolveHost($message) => $message,
+            Error::couldNotConnect($message) => $message,
+            Error::httpReturnedError($message) => $message,
+            Error::writeError($message) => $message,
+            Error::outOfMemory($message) => $message,
+            Error::timeout($message) => $message,
+            Error::sslConnectError($message) => $message,
+            Error::fileCouldNotReadFile($message) => $message,
+            Error::tooManyRedirects($message) => $message,
+            Error::unknownOption($message) => $message,
+            Error::peerFailedVerification($message) => $message,
+            Error::other($code, $message) => $message,
+        };
+    }
+}
+
+// the CURLcodes this library names. curl's numbering is frozen ABI, so these are literals
+// with the C name beside them, not something read out of a header at build time
+public const int32 CODE_OK                       = 0;
+public const int32 CODE_UNSUPPORTED_PROTOCOL     = 1;
+public const int32 CODE_FAILED_INIT              = 2;
+public const int32 CODE_URL_MALFORMAT            = 3;
+public const int32 CODE_COULDNT_RESOLVE_PROXY    = 5;
+public const int32 CODE_COULDNT_RESOLVE_HOST     = 6;
+public const int32 CODE_COULDNT_CONNECT          = 7;
+public const int32 CODE_HTTP_RETURNED_ERROR      = 22;
+public const int32 CODE_WRITE_ERROR              = 23;
+public const int32 CODE_OUT_OF_MEMORY            = 27;
+public const int32 CODE_OPERATION_TIMEDOUT       = 28;
+public const int32 CODE_SSL_CONNECT_ERROR        = 35;
+public const int32 CODE_FILE_COULDNT_READ_FILE   = 37;
+public const int32 CODE_TOO_MANY_REDIRECTS       = 47;
+public const int32 CODE_UNKNOWN_OPTION           = 48;
+public const int32 CODE_PEER_FAILED_VERIFICATION = 60;

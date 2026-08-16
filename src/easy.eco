@@ -1,0 +1,432 @@
+/**
+ * One libcurl easy handle, and the two buffers a transfer fills.
+ *
+ * This is the floor of the library. Everything above it is values and convenience, and
+ * anything libcurl can do is reachable from here. Most programs never name it: `Client`
+ * and `Request` are the surface. Nothing is hidden behind them.
+ *
+ * **`#[unique]`, not a class, and the reason is a bug rather than allocation.** Every
+ * `perform()` clears both buffers. If a handle were shared, a second holder calling
+ * `body()` after the first performed again would read somebody else's response with no
+ * way to know. `#[unique]` makes that a located error at the copy instead of a puzzle
+ * at runtime. It's also the honest shape: a declared destructor already kills the
+ * synthesized copy, and the only faithful hand-written one would be `curl_easy_duphandle`,
+ * which copies the callback *data pointers* and would leave two handles writing into one
+ * buffer. `mem::buffer<T>` is the type this is modelled on.
+ *
+ * The private properties close the other door. They suppress the field-wise constructor,
+ * so you can't build an `Easy` around a handle somebody else owns.
+ */
+
+namespace curl;
+
+// CURL_ERROR_SIZE
+internal const usize ERROR_SIZE = 256;
+
+/**
+ * `CURLOPT_WRITEFUNCTION` and `CURLOPT_HEADERFUNCTION`. Same function. The only difference
+ * is which buffer it gets handed.
+ *
+ * **An ordinary Echo function handed to C.** That's what `extern function<...>` and `&name`
+ * buy you. Not a closure, not a method, not generic: those are the three things a C function
+ * pointer refuses. A C callback has no environment, so the destination arrives through
+ * curl's own userdata pointer. `CURLOPT_WRITEDATA` is exactly that.
+ *
+ * Returning anything other than the byte count is how a write callback tells libcurl to
+ * stop. That surfaces as `CURLE_WRITE_ERROR`.
+ */
+private function writeChunk(ptr<uint8> $chunk, usize $size, usize $count, ptr<uint8> $user) : usize
+{
+    usize $bytes = $size * $count;
+    ptr<string> $out = ptr<string>($user:$);
+
+    // a method call through a `ptr<T>` is one of the four spellings of the raw-address
+    // promotion, and the one thing `unsafe` exists for. what discharges it: `$user` is
+    // the address `perform()` handed curl one statement before calling it, and nothing
+    // else writes this option
+    unsafe {
+        $out->append(ptr<const uint8>($chunk:$), $bytes);
+    }
+
+    return $bytes;
+}
+
+/**
+ * A NUL-terminated copy of `$text`, or `$text` itself when it already is one.
+ *
+ * Here's the catch: `cstr()` asserts on a window that stops early. A substring shares its
+ * parent's buffer and has no terminator of its own, and a header value from `parseHeaders`
+ * is exactly that. Returning the original when it's already terminated keeps the common
+ * case at one retain.
+ */
+private function nulTerminated(const string& $text) : string
+{
+    if ($text->terminated()) {
+        return $text;
+    }
+
+    return $text->clone();
+}
+
+#[unique]
+public struct Easy
+{
+    private ptr<uint8> $handle;
+    private ptr<uint8> $slist;      // the request headers, ours to free
+    private ptr<uint8> $errbuf;     // CURL_ERROR_SIZE bytes, filled by libcurl during perform
+    private string $bodyBuf;
+    private string $headBuf;
+
+    /**
+     * A fresh handle. libcurl's global init runs if this is the first one.
+     *
+     * Failure leaves `open()` false rather than dying. Running out of handles isn't this
+     * library's call to make. Every method below tolerates a null handle and answers
+     * `CURLE_FAILED_INIT`.
+     */
+    constructor()
+    {
+        cGlobalInit(GLOBAL_DEFAULT);
+
+        // re-seated through `:$`. a plain `=` on a pointer property writes *through* it
+        $this->handle:$ = cEasyInit();
+        $this->slist:$ = null;
+        $this->errbuf:$ = mem::alloc<uint8>(ERROR_SIZE);
+        $this->bodyBuf = '';
+        $this->headBuf = '';
+
+        if ($this->errbuf:$ != null) {
+            mem::zero<uint8>($this->errbuf, ERROR_SIZE);
+        }
+
+        // a library has no business taking SIGALRM out from under its host. overridable like any
+        // other long option
+        if ($this->handle:$ != null) {
+            $this->setLong(.noSignal, 1);
+        }
+    }
+
+    /**
+     * The order matters, which is why this is written out instead of left to three
+     * properties. libcurl may read a slist option until the handle is cleaned up, so
+     * the handle goes first.
+     */
+    destructor()
+    {
+        if ($this->handle:$ != null) {
+            cEasyCleanup($this->handle);
+        }
+
+        if ($this->slist:$ != null) {
+            cSlistFree($this->slist);
+        }
+
+        mem::free($this->errbuf);
+    }
+
+    /**
+     * False when libcurl wouldn't give us a handle.
+     */
+    function open() : bool
+    {
+        if ($this->handle:$ == null) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ---- options ------------------------------------------------------------------------------
+
+    /**
+     * A `long` option: `setLong(.followRedirects, 1)`.
+     */
+    function setLong(LongOption $option, int64 $value) : int32
+    {
+        return $this->setRaw($option->value(), $value);
+    }
+
+    /**
+     * A string option: `setString(.url, 'https://example.com/')`.
+     */
+    function setString(StringOption $option, const string& $value) : int32
+    {
+        return $this->setRaw($option->value(), $value);
+    }
+
+    /**
+     * A `curl_off_t` option.
+     */
+    function setOff(OffOption $option, int64 $value) : int32
+    {
+        return $this->setRaw($option->value(), $value);
+    }
+
+    /**
+     * An option this library hasn't named, by number.
+     *
+     * The escape hatch. The enums being closed costs nothing, because anything libcurl
+     * accepts is reachable without waiting for a release. An option the installed
+     * libcurl doesn't know answers `CURLE_UNKNOWN_OPTION`, which `match`es as
+     * `.unknownOption`.
+     */
+    function setRaw(int32 $option, int64 $value) : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        return cSetopt($this->handle, $option, [$value]);
+    }
+
+    /**
+     * A string option this library hasn't named, by number.
+     */
+    function setRaw(int32 $option, const string& $value) : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        string $owned = nulTerminated($value);
+
+        return cSetopt($this->handle, $option, [$owned->cstr()]);
+    }
+
+    /**
+     * The request body. libcurl copies it, so the string can die on the next line.
+     *
+     * **The size goes in before the pointer.** With `COPYPOSTFIELDS` alone, libcurl calls
+     * `strlen` on what it's given, so a body holding a zero byte would be silently
+     * truncated. `data()` rather than `cstr()` for the same reason: the length is already
+     * known, and a body doesn't have to be terminated at all.
+     */
+    function setBody(const string& $bytes) : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        int64 $size = $bytes->size();
+        int32 $code = cSetopt($this->handle, OffOption::postFieldSize->value(), [$size]);
+
+        if ($code != CODE_OK) {
+            return $code;
+        }
+
+        return cSetopt($this->handle, OPT_COPYPOSTFIELDS, [$bytes->data()]);
+    }
+
+    /**
+     * Adds one `Name: value` line to the request headers.
+     */
+    function addHeader(const string& $line) : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        string $owned = nulTerminated($line);
+        ptr<uint8> $grown = cSlistAppend($this->slist, $owned->cstr());
+
+        if ($grown:$ == null) {
+            return CODE_OUT_OF_MEMORY;
+        }
+
+        // the head only moves on the first append, and repeating the option is free
+        $this->slist:$ = $grown;
+
+        return cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist:$]);
+    }
+
+    /**
+     * A string option set to NULL. How you undo `CURLOPT_ACCEPT_ENCODING` after a default
+     * asked for compression.
+     */
+    function clearString(StringOption $option) : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        ptr<uint8> $none = null;
+
+        return cSetopt($this->handle, $option->value(), [$none:$]);
+    }
+
+    /**
+     * Drops every request header set so far.
+     */
+    function clearHeaders() : void
+    {
+        if ($this->slist:$ != null) {
+            cSlistFree($this->slist);
+            $this->slist:$ = null;
+        }
+
+        if ($this->handle:$ != null) {
+            cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist:$]);
+        }
+    }
+
+    // ---- performing ---------------------------------------------------------------------------
+
+    /**
+     * Runs the transfer. Answers a CURLcode.
+     *
+     * **The three pointer options are set here, not in the constructor.** That's what
+     * frees this type from ever having to promise it doesn't move. libcurl only reads
+     * those addresses during the transfer, and nothing can relocate the value during a
+     * synchronous call. Set them once at construction and they'd be dangling the moment
+     * the struct was handed over.
+     */
+    function perform() : int32
+    {
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        $this->bodyBuf->clear();
+        $this->headBuf->clear();
+        mem::zero<uint8>($this->errbuf, ERROR_SIZE);
+
+        ptr<string> $bodySink = &$this->bodyBuf;
+        ptr<string> $headSink = &$this->headBuf;
+
+        extern function<usize(ptr<uint8>, usize, usize, ptr<uint8>)> $writer = &writeChunk;
+
+        cSetopt($this->handle, OPT_WRITEFUNCTION, [$writer]);
+        cSetopt($this->handle, OPT_WRITEDATA, [ptr<uint8>($bodySink:$)]);
+        cSetopt($this->handle, OPT_HEADERFUNCTION, [$writer]);
+        cSetopt($this->handle, OPT_HEADERDATA, [ptr<uint8>($headSink:$)]);
+        cSetopt($this->handle, OPT_ERRORBUFFER, [$this->errbuf:$]);
+
+        return cPerform($this->handle);
+    }
+
+    /**
+     * Drops every option, and the request headers with them.
+     *
+     * `curl_easy_reset` clears the callbacks and the error buffer too, but `perform()`
+     * re-applies those every time, so there's nothing to restore here. Connections
+     * survive a reset. That's the whole reason a `Client` reuses one handle.
+     */
+    function reset() : void
+    {
+        if ($this->handle:$ == null) {
+            return;
+        }
+
+        cEasyReset($this->handle);
+
+        if ($this->slist:$ != null) {
+            cSlistFree($this->slist);
+            $this->slist:$ = null;
+        }
+
+        $this->bodyBuf->clear();
+        $this->headBuf->clear();
+
+        $this->setLong(.noSignal, 1);
+    }
+
+    // ---- what came back -----------------------------------------------------------------------
+
+    /**
+     * The response body. A zero byte in it is a byte like any other.
+     */
+    function body() : string
+    {
+        return $this->bodyBuf;
+    }
+
+    /**
+     * Every response header block, status lines and all, exactly as they arrived.
+     */
+    function rawHeaders() : string
+    {
+        return $this->headBuf;
+    }
+
+    /**
+     * The failure that goes with a CURLcode.
+     *
+     * Prefers what libcurl wrote into the error buffer, which names the host or the
+     * certificate, and falls back to the generic text for the code.
+     */
+    function error(int32 $code) : Error
+    {
+        if ($this->errbuf:$ == null) {
+            return Error::from($code, str::from(cStrerror($code)));
+        }
+
+        string $written = str::from($this->errbuf);
+
+        if ($written->empty()) {
+            return Error::from($code, str::from(cStrerror($code)));
+        }
+
+        return Error::from($code, $written);
+    }
+
+    // ---- reading the handle back ----------------------------------------------------------------
+
+    function infoLong(LongInfo $info) : int64
+    {
+        int64 $value = 0;
+
+        if ($this->handle:$ == null) {
+            return $value;
+        }
+
+        cGetinfo($this->handle, $info->value(), [&$value]);
+
+        return $value;
+    }
+
+    function infoDouble(DoubleInfo $info) : float64
+    {
+        float64 $value = 0.0;
+
+        if ($this->handle:$ == null) {
+            return $value;
+        }
+
+        cGetinfo($this->handle, $info->value(), [&$value]);
+
+        return $value;
+    }
+
+    /**
+     * A string info, or nothing.
+     *
+     * Owning, not a view. That's forced: libcurl says several of these point into storage
+     * it may reuse on the next call.
+     */
+    function infoString(StringInfo $info) : string?
+    {
+        ptr<uint8> $out = null;
+
+        if ($this->handle:$ == null) {
+            return null;
+        }
+
+        if (cGetinfo($this->handle, $info->value(), [&$out]) != CODE_OK) {
+            return null;
+        }
+
+        if ($out:$ == null) {
+            return null;
+        }
+
+        return str::from($out);
+    }
+
+    /**
+     * The `CURL*` itself, for anything this type doesn't wrap.
+     */
+    function raw() : ptr<uint8>
+    {
+        return $this->handle;
+    }
+}
