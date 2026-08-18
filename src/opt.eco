@@ -75,7 +75,6 @@ public enum OffOption : int32
 // the options this library sets itself, by number. plumbing, not surface. naming them in
 // the enums above would invite a caller to fight `Easy` for the handle
 internal const int32 OPT_WRITEDATA      = 10001;    // CURLOPT_WRITEDATA
-internal const int32 OPT_ERRORBUFFER    = 10010;    // CURLOPT_ERRORBUFFER
 internal const int32 OPT_HTTPHEADER     = 10023;    // CURLOPT_HTTPHEADER
 internal const int32 OPT_HEADERDATA     = 10029;    // CURLOPT_HEADERDATA
 internal const int32 OPT_COPYPOSTFIELDS = 10165;    // CURLOPT_COPYPOSTFIELDS

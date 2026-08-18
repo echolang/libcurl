@@ -184,11 +184,10 @@ public function send(const Request& $request) : result<Response, Error>
         return .error(Error::failedInit('libcurl would not open a handle'));
     }
 
-    Request $ready = prepare($request);
     array<Opt> $empty = array<Opt>();
     array<Opt> $opts = stackOpts($empty, $request->opts);
 
-    return perform($once, $ready, $opts);
+    return perform($once, $request, $opts);
 }
 
 /**

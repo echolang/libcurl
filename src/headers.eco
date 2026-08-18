@@ -203,7 +203,7 @@ public function parseHeaders(const string& $raw) : Headers
 {
     Headers $out = Headers();
 
-    array<string> $lines = str::split($raw, '\n');
+    str::parts $lines = str::split($raw, '\n');
     usize $count = $lines->count();
 
     string $pendingName = '';
@@ -215,7 +215,7 @@ public function parseHeaders(const string& $raw) : Headers
     while ($i < $count) {
         // rtrim, not trim: a leading space is what marks a continuation, so it has to
         // survive long enough to be read
-        string $line = str::rtrim($lines[$i]);
+        string $line = str::from(str::rtrim($lines->at($i)));
 
         $i = $i + 1;
 

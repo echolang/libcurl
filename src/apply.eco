@@ -76,14 +76,6 @@ internal function stackOpts(const array<Opt>& $client, const array<Opt>& $reques
 }
 
 /**
- * No client. URL and headers as the caller wrote them.
- */
-internal function prepare(const Request& $request) : Request
-{
-    return $request;
-}
-
-/**
  * Join the base URL, merge headers. Options stay on the two lists; `stackOpts` concatenates.
  */
 internal function prepare(const Client& $client, const Request& $request) : Request

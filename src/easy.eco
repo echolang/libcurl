@@ -20,9 +20,6 @@
 
 namespace curl;
 
-// CURL_ERROR_SIZE
-internal const usize ERROR_SIZE = 256;
-
 /**
  * `CURLOPT_WRITEFUNCTION` and `CURLOPT_HEADERFUNCTION`. Same function. The only difference
  * is which buffer it gets handed.
@@ -73,7 +70,6 @@ public struct Easy
 {
     private ptr<uint8> $handle;
     private ptr<uint8> $slist;      // the request headers, ours to free
-    private ptr<uint8> $errbuf;     // CURL_ERROR_SIZE bytes, filled by libcurl during perform
     private string $bodyBuf;
     private string $headBuf;
 
@@ -91,13 +87,8 @@ public struct Easy
         // re-seated through `:$`. a plain `=` on a pointer property writes *through* it
         $this->handle:$ = cEasyInit();
         $this->slist:$ = null;
-        $this->errbuf:$ = mem::alloc<uint8>(ERROR_SIZE);
         $this->bodyBuf = '';
         $this->headBuf = '';
-
-        if ($this->errbuf:$ != null) {
-            mem::zero<uint8>($this->errbuf, ERROR_SIZE);
-        }
 
         // a library has no business taking SIGALRM out from under its host. overridable like any
         // other long option
@@ -107,9 +98,9 @@ public struct Easy
     }
 
     /**
-     * The order matters, which is why this is written out instead of left to three
-     * properties. libcurl may read a slist option until the handle is cleaned up, so
-     * the handle goes first.
+     * The order matters, which is why this is written out instead of left to the two
+     * pointer properties. libcurl may read a slist option until the handle is cleaned
+     * up, so the handle goes first.
      */
     destructor()
     {
@@ -120,8 +111,6 @@ public struct Easy
         if ($this->slist:$ != null) {
             cSlistFree($this->slist);
         }
-
-        mem::free($this->errbuf);
     }
 
     /**
@@ -274,11 +263,11 @@ public struct Easy
     /**
      * Runs the transfer. Answers a CURLcode.
      *
-     * **The three pointer options are set here, not in the constructor.** That's what
-     * frees this type from ever having to promise it doesn't move. libcurl only reads
-     * those addresses during the transfer, and nothing can relocate the value during a
-     * synchronous call. Set them once at construction and they'd be dangling the moment
-     * the struct was handed over.
+     * **The write and header pointer options are set here, not in the constructor.**
+     * That's what frees this type from ever having to promise it doesn't move. libcurl
+     * only reads those addresses during the transfer, and nothing can relocate the
+     * value during a synchronous call. Set them once at construction and they'd be
+     * dangling the moment the struct was handed over.
      */
     function perform() : int32
     {
@@ -288,7 +277,6 @@ public struct Easy
 
         $this->bodyBuf->clear();
         $this->headBuf->clear();
-        mem::zero<uint8>($this->errbuf, ERROR_SIZE);
 
         ptr<string> $bodySink = &$this->bodyBuf;
         ptr<string> $headSink = &$this->headBuf;
@@ -299,7 +287,6 @@ public struct Easy
         cSetopt($this->handle, OPT_WRITEDATA, [ptr<uint8>($bodySink:$)]);
         cSetopt($this->handle, OPT_HEADERFUNCTION, [$writer]);
         cSetopt($this->handle, OPT_HEADERDATA, [ptr<uint8>($headSink:$)]);
-        cSetopt($this->handle, OPT_ERRORBUFFER, [$this->errbuf:$]);
 
         return cPerform($this->handle);
     }
@@ -307,9 +294,9 @@ public struct Easy
     /**
      * Drops every option, and the request headers with them.
      *
-     * `curl_easy_reset` clears the callbacks and the error buffer too, but `perform()`
-     * re-applies those every time, so there's nothing to restore here. Connections
-     * survive a reset. That's the whole reason a `Client` reuses one handle.
+     * `curl_easy_reset` clears the callbacks too, but `perform()` re-applies those
+     * every time, so there's nothing to restore here. Connections survive a reset.
+     * That's the whole reason a `Client` reuses one handle.
      */
     function reset() : void
     {
@@ -351,22 +338,11 @@ public struct Easy
     /**
      * The failure that goes with a CURLcode.
      *
-     * Prefers what libcurl wrote into the error buffer, which names the host or the
-     * certificate, and falls back to the generic text for the code.
+     * libcurl's sentence for the CURLcode.
      */
     function error(int32 $code) : Error
     {
-        if ($this->errbuf:$ == null) {
-            return Error::from($code, str::from(cStrerror($code)));
-        }
-
-        string $written = str::from($this->errbuf);
-
-        if ($written->empty()) {
-            return Error::from($code, str::from(cStrerror($code)));
-        }
-
-        return Error::from($code, $written);
+        return Error::from($code, str::from(cStrerror($code)));
     }
 
     // ---- reading the handle back ----------------------------------------------------------------

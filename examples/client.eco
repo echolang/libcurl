@@ -1,0 +1,41 @@
+// a client holds one connection and your defaults, so a run of requests says them once.
+//
+//   echoc run -m . examples/client.eco
+//
+// the document is a static file on echoc.dev, so this needs no echo server and no
+// httpbin. it is `docs/public/libcurl.json` in the Echo repo.
+
+curl::Client $api = curl::Client();
+
+$api->baseUrl = 'https://echoc.dev';
+$api->header('Accept', 'application/json');
+$api->userAgent('libcurl-example/0.1');
+$api->timeout(10000);
+
+curl::Response $first = guard $api->send(.get('/libcurl.json')) else ($e) {
+    die("the first fetch failed: {$e}");
+}
+
+echo "GET   {$first->status}  {$first->contentType() ?? '?'}";
+echo $first->body;
+
+// a second request on the same handle. query and a request header ride on this one
+// only; Accept and the user agent are still the client's
+curl::Query $params = curl::Query();
+$params->add('q', 'echo lang');
+$params->addInt('page', 2);
+
+curl::Request $again = .get('/libcurl.json');
+$again->query($params);
+$again->timeout(5000);
+$again->header('X-Trace', 'example');
+
+curl::Response $found = guard $api->send($again) else ($e) {
+    die("the second fetch failed: {$e}");
+}
+
+echo "GET   {$found->status}  {$found->url}";
+
+foreach ($found->headers->items as const &$header) {
+    echo "  {$header->name}: {$header->value}";
+}

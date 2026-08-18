@@ -1,0 +1,16 @@
+// the shortest thing that works: build a request, send it, use what came back.
+//
+//   echoc run -m . examples/get.eco
+
+curl::Request $req = .get('https://echoc.dev');
+
+// some hosts refuse a request with no user agent. a fair thing for an example to show
+$req->userAgent('libcurl-example/0.1');
+
+curl::Response $res = guard curl::send($req) else ($e) {
+    die("request failed: {$e}");
+}
+
+echo "{$res->status} in {$res->seconds:.3f}s";
+echo $res->contentType() ?? '(no content type)';
+echo $res->body;

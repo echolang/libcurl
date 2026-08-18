@@ -1,0 +1,34 @@
+// the same library with no network at all. curl speaks file://, which is enough to see
+// the whole path work: the Echo write callback, the body arriving in a string, and the
+// error side.
+//
+//   echoc run -m . examples/fileUrl.eco
+
+string $path = '/tmp/libcurl_example.txt';
+
+usize $written = guard std::io::writefile($path, 'the body came back through an Echo callback') else ($e) {
+    die("could not write the fixture: {$e}");
+}
+
+curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+    die("the transfer failed: {$e}");
+}
+
+// a file:// response has no headers and no HTTP status, so `status` is zero and
+// `success()` is false, even though the transfer worked perfectly. that split is why
+// a failure is a separate type
+echo $res->body;
+echo "status {$res->status}, success {$res->success()}";
+
+// the failing side, with a real message from libcurl
+result<curl::Response, curl::Error> $missing = curl::send(.get('file:///tmp/libcurl_no_such_file'));
+
+if ($missing->failed()) {
+    curl::Error $err = $missing->failure();
+
+    echo "code {$err->value()}: {$err}";
+}
+
+bool $gone = guard std::io::remove($path) else ($e) {
+    die("could not clean up: {$e}");
+}

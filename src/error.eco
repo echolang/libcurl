@@ -134,7 +134,7 @@ public enum Error
     }
 
     /**
-     * What went wrong, in words. `CURLOPT_ERRORBUFFER` when libcurl filled it.
+     * What went wrong, in words. libcurl's sentence for the CURLcode.
      */
     const function message() : string
     {
