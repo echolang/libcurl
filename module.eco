@@ -7,8 +7,15 @@
 
 // three places: the executable's link line under `build`, and a `dlopen` of libcurl before
 // the JIT starts under `run`. where libcurl lives is the machine's problem, not this file's.
-// `echoc build --link search:/opt/homebrew/opt/curl/lib` is how you point at it
+// `echoc build --link search:/opt/homebrew/opt/curl/lib` is how you point at it.
+// `--define static_curl` is the release valve: seats libcurl.a from a `--link search:`.
+#[if: static_curl]
+#[link: lib { name: "curl", linkage: static }]
+#[link: lib { name: "ssl", linkage: static }]
+#[link: lib { name: "crypto", linkage: static }]
+#[else]
 #[link: lib "curl"]
+#[end]
 
 #[sources: "src/*.eco"]
 

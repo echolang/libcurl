@@ -23,16 +23,13 @@ That is the whole shape of the library: one `Request`, one `send`, and a `result
 
 ## Installing
 
-There is no package manager, so a dependency is a path on disk. Place this repository beside your project and name it in your module file:
+From your project directory:
 
-```echo
-// your module.eco
-#[module: "myapp"]
-#[depends: "../libcurl"]
-#[sources: "src/*.eco"]
+```bash
+epm add echolang/libcurl --git https://github.com/echolang/libcurl --range ^0.1
 ```
 
-`#[link: lib "curl"]` travels with this module, so you never write it yourself.
+That writes a `#[requires:]` line and vendors the sources. `#[link: lib "curl"]` travels with this module, so you never write it yourself.
 
 ### Finding libcurl
 
