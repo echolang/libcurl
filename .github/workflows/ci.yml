@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
+        os: [macos-15, ubuntu-24.04, windows-2022]
 
     steps:
       - uses: actions/checkout@v5
@@ -30,8 +30,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev
 
+      - name: Install libcurl
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install curl:x64-windows-static
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static"
+          echo "LIBCURL_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build and test
+        if: runner.os != 'Windows'
         run: echoc test
+
+      - name: Build and test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echoc test --link "search:$env:LIBCURL_PREFIX\lib" --link lib:zlib
 
   release:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')

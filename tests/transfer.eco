@@ -12,16 +12,33 @@
  * the type.
  */
 
+function fixturePath(const string& $name) : string
+{
+    string $path = str::from(std::env::tmp());
+
+    $path->append(std::env::DS);
+    $path->append($name);
+
+    return $path;
+}
+
+#[group: "unit"]
+test file_url_encodes_spaces_and_windows_slashes {
+    assert(std::env::file_url('/tmp/fixture.txt') == 'file:///tmp/fixture.txt', 'a unix path keeps its slashes');
+    assert(std::env::file_url('/tmp/First Last/x') == 'file:///tmp/First%20Last/x', 'a space is percent-encoded');
+    assert(std::env::file_url("C:\u{5C}Users\u{5C}First Last\u{5C}x") == 'file:///C:/Users/First%20Last/x', 'a windows path becomes a file url');
+}
+
 #[group: "unit"]
 test reads_a_file_url {
-    string $path = '/tmp/libcurl_test_body.txt';
+    string $path = fixturePath('libcurl test body.txt');
     string $text = 'hello from libcurl';
 
     usize $written = guard std::io::writefile($path, $text) else ($e) {
         die("could not write the fixture: {$e}");
     }
 
-    curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+    curl::Response $res = guard curl::send(.get(std::env::file_url($path))) else ($e) {
         die("the transfer failed: {$e}");
     }
 
@@ -36,7 +53,7 @@ test reads_a_file_url {
 
 #[group: "unit"]
 test a_missing_file_is_an_error_with_a_reason {
-    curl::Request $req = .get('file:///tmp/libcurl_no_such_file_here');
+    curl::Request $req = .get(std::env::file_url(fixturePath('libcurl_no_such_file_here')));
 
     result<curl::Response, curl::Error> $outcome = curl::send($req);
 
@@ -62,7 +79,7 @@ test an_unknown_scheme_is_refused {
  */
 #[group: "unit"]
 test a_large_body_is_reassembled {
-    string $path = '/tmp/libcurl_test_large.txt';
+    string $path = fixturePath('libcurl_test_large.txt');
     string $line = 'the quick brown fox jumps over the lazy dog\n';
     string $text = str::repeat($line, 4000);
 
@@ -70,7 +87,7 @@ test a_large_body_is_reassembled {
         die("could not write the fixture: {$e}");
     }
 
-    curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+    curl::Response $res = guard curl::send(.get(std::env::file_url($path))) else ($e) {
         die("the transfer failed: {$e}");
     }
 
@@ -84,7 +101,7 @@ test a_large_body_is_reassembled {
 
 #[group: "unit"]
 test a_client_reuses_its_handle {
-    string $path = '/tmp/libcurl_test_reuse.txt';
+    string $path = fixturePath('libcurl_test_reuse.txt');
 
     usize $written = guard std::io::writefile($path, 'one') else ($e) {
         die("could not write the fixture: {$e}");
@@ -92,11 +109,11 @@ test a_client_reuses_its_handle {
 
     curl::Client $client = curl::Client();
 
-    curl::Response $first = guard $client->send(.get("file://{$path}")) else ($e) {
+    curl::Response $first = guard $client->send(.get(std::env::file_url($path))) else ($e) {
         die("the first transfer failed: {$e}");
     }
 
-    curl::Response $second = guard $client->send(.get("file://{$path}")) else ($e) {
+    curl::Response $second = guard $client->send(.get(std::env::file_url($path))) else ($e) {
         die("the second transfer failed: {$e}");
     }
 
@@ -120,7 +137,7 @@ test error_without_perform_does_not_walk_garbage {
 
 #[group: "unit"]
 test a_raw_unknown_option_fails_send {
-    curl::Request $req = .get('file:///tmp/libcurl_unused');
+    curl::Request $req = .get(std::env::file_url(fixturePath('libcurl_unused')));
     $req->raw(999999, 1);
 
     result<curl::Response, curl::Error> $outcome = curl::send($req);
@@ -134,7 +151,7 @@ test a_client_raw_unknown_option_fails_send {
     curl::Client $client = curl::Client();
     $client->raw(999999, 1);
 
-    result<curl::Response, curl::Error> $outcome = $client->send(.get('file:///tmp/libcurl_unused'));
+    result<curl::Response, curl::Error> $outcome = $client->send(.get(std::env::file_url(fixturePath('libcurl_unused'))));
 
     assert($outcome->failed(), 'send did not run the transfer');
     assert($outcome->failure()->value() == curl::CODE_UNKNOWN_OPTION, 'and the client hatch reports it too');
@@ -142,7 +159,7 @@ test a_client_raw_unknown_option_fails_send {
 
 #[group: "unit"]
 test client_raw_survives_a_reset {
-    string $path = '/tmp/libcurl_test_raw.txt';
+    string $path = fixturePath('libcurl_test_raw.txt');
 
     usize $written = guard std::io::writefile($path, 'raw') else ($e) {
         die("could not write the fixture: {$e}");
@@ -151,7 +168,7 @@ test client_raw_survives_a_reset {
     curl::Client $client = curl::Client();
     $client->raw(213, 1);
 
-    curl::Response $res = guard $client->send(.get("file://{$path}")) else ($e) {
+    curl::Response $res = guard $client->send(.get(std::env::file_url($path))) else ($e) {
         die("raw-then-send failed: {$e}");
     }
 

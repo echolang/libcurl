@@ -3,7 +3,7 @@
  *
  * Same split as `opt.eco`, and for the same reason: `curl_easy_getinfo` writes through the
  * pointer it's handed, so asking a `CURLINFO_STRING` for a `long` writes an address into
- * eight bytes of integer and answers nonsense.
+ * a long-sized integer slot and answers nonsense.
  *
  * Read through `Easy::infoLong` / `infoString` / `infoDouble`, named per family rather
  * than overloaded. An info has only the one argument, so a leading-dot shorthand would

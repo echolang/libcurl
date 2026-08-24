@@ -132,7 +132,11 @@ public struct Easy
      */
     function setLong(LongOption $option, int64 $value) : int32
     {
-        return $this->setRaw($option->value(), $value);
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        return setoptLong($this->handle, $option->value(), $value);
     }
 
     /**
@@ -148,7 +152,11 @@ public struct Easy
      */
     function setOff(OffOption $option, int64 $value) : int32
     {
-        return $this->setRaw($option->value(), $value);
+        if ($this->handle:$ == null) {
+            return CODE_FAILED_INIT;
+        }
+
+        return setoptOff($this->handle, $option->value(), $value);
     }
 
     /**
@@ -165,7 +173,11 @@ public struct Easy
             return CODE_FAILED_INIT;
         }
 
-        return cSetopt($this->handle, $option, [$value]);
+        if ($option >= CURLOPTTYPE_OFF_T && $option < CURLOPTTYPE_BLOB) {
+            return setoptOff($this->handle, $option, $value);
+        }
+
+        return setoptLong($this->handle, $option, $value);
     }
 
     /**
@@ -197,7 +209,7 @@ public struct Easy
         }
 
         int64 $size = $bytes->size();
-        int32 $code = cSetopt($this->handle, OffOption::postFieldSize->value(), [$size]);
+        int32 $code = setoptOff($this->handle, OffOption::postFieldSize->value(), $size);
 
         if ($code != CODE_OK) {
             return $code;
@@ -349,15 +361,11 @@ public struct Easy
 
     function infoLong(LongInfo $info) : int64
     {
-        int64 $value = 0;
-
         if ($this->handle:$ == null) {
-            return $value;
+            return 0;
         }
 
-        cGetinfo($this->handle, $info->value(), [&$value]);
-
-        return $value;
+        return getinfoLong($this->handle, $info->value());
     }
 
     function infoDouble(DoubleInfo $info) : float64

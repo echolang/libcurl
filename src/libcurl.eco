@@ -14,19 +14,33 @@
  * There is no header to check against. The mapping this file uses:
  *
  *     CURL* / void*        ptr<uint8>          size_t          usize
- *     const char*          ptr<const uint8>    long            int64
- *     char*                ptr<uint8>          curl_off_t      int64
- *     int / CURLcode       int32               double          float64
+ *     const char*          ptr<const uint8>    curl_off_t      int64
+ *     char*                ptr<uint8>          int / CURLcode  int32
+ *     double               float64
  *
- * `long` is the one that's a *platform* claim rather than a C claim. It holds on darwin
- * and linux. It's wrong under Windows' LLP64, which is why this library doesn't target it.
+ * `long` is the one that's a *platform* claim rather than a C claim. darwin and linux
+ * are LP64, so it is `int64`. Windows is LLP64, so it is `int32`. The public API stays
+ * `int64`; the helpers below narrow at the call.
  */
 
 namespace curl;
 
+// CURL_GLOBAL_SSL | CURL_GLOBAL_WIN32. width matches cGlobalInit's long
+#[if: os == windows]
 internal extern {
-    function curl_global_init    as cGlobalInit(int64 $flags) : int32;
+    function curl_global_init as cGlobalInit(int32 $flags) : int32;
+}
 
+internal const int32 GLOBAL_DEFAULT = 3;
+#[else]
+internal extern {
+    function curl_global_init as cGlobalInit(int64 $flags) : int32;
+}
+
+internal const int64 GLOBAL_DEFAULT = 3;
+#[end]
+
+internal extern {
     function curl_easy_init      as cEasyInit() : ptr<uint8>;
     function curl_easy_cleanup   as cEasyCleanup(ptr<uint8> $handle) : void;
     function curl_easy_reset     as cEasyReset(ptr<uint8> $handle) : void;
@@ -52,5 +66,45 @@ internal extern {
 // a leak. Percent-encoding is thirty lines of Echo (`query.eco`), and writing it here
 // keeps `Query` a pure value that needs no handle and no connection to test.
 
-// CURL_GLOBAL_SSL | CURL_GLOBAL_WIN32
-internal const int64 GLOBAL_DEFAULT = 3;
+/**
+ * A `long` setopt. The public value is `int64`; the tail matches C's width.
+ */
+internal function setoptLong(ptr<uint8> $handle, int32 $option, int64 $value) : int32
+{
+    #[if: os == windows]
+    int32 $narrow = $value as int32;
+
+    return cSetopt($handle, $option, [$narrow]);
+    #[else]
+    return cSetopt($handle, $option, [$value]);
+    #[end]
+}
+
+/**
+ * A `curl_off_t` setopt. Always 64-bit, on every platform we ship.
+ */
+internal function setoptOff(ptr<uint8> $handle, int32 $option, int64 $value) : int32
+{
+    return cSetopt($handle, $option, [$value]);
+}
+
+/**
+ * A `long` getinfo. Writes a platform-width slot and answers `int64`.
+ */
+internal function getinfoLong(ptr<uint8> $handle, int32 $info) : int64
+{
+    #[if: os == windows]
+    int32 $value = 0;
+
+    cGetinfo($handle, $info, [&$value]);
+
+    return $value as int64;
+    #[else]
+    int64 $value = 0;
+
+    cGetinfo($handle, $info, [&$value]);
+
+    return $value;
+    #[end]
+}
+

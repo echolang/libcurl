@@ -3,13 +3,24 @@
  */
 
 #[module: "libcurl"]
-#[version: "0.1.0"]
+#[version: "0.1.0"] // x-release-please-version
 
-// three places: the executable's link line under `build`, and a `dlopen` of libcurl before
-// the JIT starts under `run`. where libcurl lives is the machine's problem, not this file's.
-// `echoc build --link search:/opt/homebrew/opt/curl/lib` is how you point at it.
-// `--define static_curl` is the release valve: seats libcurl.a from a `--link search:`.
-#[if: static_curl]
+// Windows `echoc test` / `run` native-link, so the archive can sit on the link line.
+// `name: "curl"` is the one `archive_in_search` looks up as `libcurl.lib` / `libcurl.a`.
+// Schannel is the TLS stack; the system libraries below are what that archive needs.
+// darwin/linux `echoc test` / `run` go through the JIT, which cannot open an archive,
+// so they stay `-lcurl` unless a real `echoc build --define static_curl` seats it.
+#[if: os == windows]
+#[link: lib { name: "curl", linkage: static }]
+#[link: lib "ws2_32"]
+#[link: lib "crypt32"]
+#[link: lib "advapi32"]
+#[link: lib "bcrypt"]
+#[link: lib "normaliz"]
+#[link: lib "wldap32"]
+#[link: lib "secur32"]
+#[link: lib "iphlpapi"]
+#[elif: static_curl]
 #[link: lib { name: "curl", linkage: static }]
 #[link: lib { name: "ssl", linkage: static }]
 #[link: lib { name: "crypto", linkage: static }]

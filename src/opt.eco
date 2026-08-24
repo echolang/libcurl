@@ -8,9 +8,10 @@
  *
  * **One enum per C type is what makes the value safe.** A variadic tail element keeps its
  * own type, and there's no destination to type a literal against, so `cSetopt($h, 52, [1])`
- * would place a four-byte `int32` where C reads an eight-byte `long`. That's the oldest
- * bug in every curl binding. Going through `Easy::setLong` widens the value before the
- * list is built, so the mistake is unreachable rather than merely discouraged.
+ * would place a four-byte `int32` where C reads a `long` — eight bytes on darwin/linux,
+ * four on Windows. That's the oldest bug in every curl binding. Going through
+ * `Easy::setLong` matches the width before the list is built, so the mistake is
+ * unreachable rather than merely discouraged.
  *
  * The number on each case is curl's, frozen ABI, with the C name beside it so a line can
  * be checked against `curl.h` at a glance. An option we haven't named yet is reachable
@@ -71,6 +72,11 @@ public enum OffOption : int32
     case maxFileSize    = 30117;    // CURLOPT_MAXFILESIZE_LARGE
     case postFieldSize  = 30120;    // CURLOPT_POSTFIELDSIZE_LARGE
 }
+
+// curl encodes the C value type in the option number. `setRaw` reads this so an unnamed
+// curl_off_t still gets a 64-bit tail. the named enums already know their own family
+internal const int32 CURLOPTTYPE_OFF_T = 30000;
+internal const int32 CURLOPTTYPE_BLOB  = 40000;
 
 // the options this library sets itself, by number. plumbing, not surface. naming them in
 // the enums above would invite a caller to fight `Easy` for the handle
