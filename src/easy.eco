@@ -1261,7 +1261,11 @@ test an_easy_handle_reads_resets_and_reads_again {
 
     assert($handle->body() == 'twelve bytes', 'the body of the last perform, not two of them');
     assert($handle->bytes() == 12, 'and the count of the last perform');
-    assert(($handle->infoString(.effectiveUrl) ?? '') == std::env::file_url($path), 'the url reads back');
+    // curl on windows drops the slash before a drive letter, so `file:///C:/x` reads back
+    // as `file://C:/x`. the scheme and the file name survive everywhere
+    string $effective = $handle->infoString(.effectiveUrl) ?? '';
+
+    assert($effective->starts('file://') && $effective->ends('/libcurl_easy_inline.txt'), 'the url reads back');
     assert($handle->infoLong(.responseCode) == 0, 'file:// has no status');
     assert($handle->raw() != null, 'and the CURL* is there for anything unwrapped');
 

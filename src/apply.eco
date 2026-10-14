@@ -333,26 +333,36 @@ internal function collect(Easy& $easy) : Response
 {
     string $raw = $easy->rawHeaders();
 
+    Timings $marks = Timings(
+        $easy->infoDouble(.nameLookupTime),
+        $easy->infoDouble(.connectTime),
+        $easy->infoDouble(.appConnectTime),
+        $easy->infoDouble(.preTransferTime),
+        $easy->infoDouble(.startTransferTime),
+        $easy->infoDouble(.redirectTime)
+    );
+
+    // older libcurl (8.5, Ubuntu 24.04) can read the total over file:// before the marks it
+    // already set, so it lands a few microseconds short of them. the end is never before a mark
+    float64 $seconds = std::math::max($easy->infoDouble(.totalTime), $marks->firstByte);
+    $seconds = std::math::max($seconds, $marks->sent);
+    $seconds = std::math::max($seconds, $marks->tls);
+    $seconds = std::math::max($seconds, $marks->connect);
+    $seconds = std::math::max($seconds, $marks->dns);
+
     return Response(
         $easy->infoLong(.responseCode),
         $easy->body(),
         $easy->bytes(),
         $easy->infoString(.effectiveUrl) ?? '',
-        $easy->infoDouble(.totalTime),
+        $seconds,
         parseHeaders($raw),
         $raw,
         $easy->infoLong(.redirectCount),
         HttpVersion::from($easy->infoLong(.httpVersion) as int32),
         $easy->infoString(.primaryIp) ?? '',
         $easy->infoLong(.primaryPort),
-        Timings(
-            $easy->infoDouble(.nameLookupTime),
-            $easy->infoDouble(.connectTime),
-            $easy->infoDouble(.appConnectTime),
-            $easy->infoDouble(.preTransferTime),
-            $easy->infoDouble(.startTransferTime),
-            $easy->infoDouble(.redirectTime)
-        )
+        $marks
     );
 }
 

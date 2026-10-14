@@ -192,7 +192,9 @@ test a_failed_save_leaves_no_file_behind {
 #[group: "unit"]
 test an_unwritable_save_path_is_a_write_error {
     string $source = fixture('libcurl_stream_nowhere.txt', 'body');
-    string $target = std::env::join(fixturePath('libcurl_no_such_directory'), 'saved.txt');
+    // bound first: echoc 0.8 hands back a corrupted path when join takes a temporary string
+    string $missing = fixturePath('libcurl_no_such_directory');
+    string $target = std::env::join($missing, 'saved.txt');
 
     curl::Request $req = .get(std::env::file_url($source));
     $req->saveTo($target);
