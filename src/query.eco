@@ -176,13 +176,20 @@ public struct Field
  */
 public struct Query
 {
+    /** In the order they render. Duplicates are kept, `tag=a&tag=b`. */
     public array<Field> $pairs;
 
+    /**
+     * No pairs. `encode()` is empty until you add one.
+     */
     constructor()
     {
         $this->pairs = array<Field>();
     }
 
+    /**
+     * Appends a pair. Both halves are percent-encoded when it renders, never here.
+     */
     function add(const string& $name, const string& $value) : void
     {
         $this->pairs[] = Field($name, $value);
@@ -196,11 +203,17 @@ public struct Query
         $this->pairs[] = Field($name, str::from($value));
     }
 
+    /**
+     * How many pairs, duplicates counted.
+     */
     const function count() : usize
     {
         return $this->pairs->count();
     }
 
+    /**
+     * True when there are none.
+     */
     const function empty() : bool
     {
         return $this->pairs->empty();
@@ -231,4 +244,76 @@ public struct Query
 
         return $out;
     }
+}
+
+#[group: "unit"]
+test unreserved_is_exactly_the_rfc_set {
+    usize $kept = 0;
+    uint8 $b = 0;
+
+    while (true) {
+        if (unreserved($b)) {
+            $kept = $kept + 1;
+        }
+
+        if ($b == 255) {
+            break;
+        }
+
+        $b = $b + 1;
+    }
+
+    assert($kept == 66, 'A-Z, a-z, 0-9 and four punctuation bytes');
+    assert(!unreserved(64) && !unreserved(91), 'the bytes either side of A-Z');
+    assert(!unreserved(96) && !unreserved(123), 'the bytes either side of a-z');
+    assert(!unreserved(47) && !unreserved(58), 'the bytes either side of 0-9');
+}
+
+#[group: "unit"]
+test hex_value_reads_both_cases {
+    assert(hexValue(48) == 0 && hexValue(57) == 9, '0 and 9');
+    assert(hexValue(65) == 10 && hexValue(70) == 15, 'A and F');
+    assert(hexValue(97) == 10 && hexValue(102) == 15, 'a and f');
+    assert(hexValue(71) == -1 && hexValue(103) == -1 && hexValue(47) == -1, 'G, g and / are not digits');
+}
+
+#[group: "unit"]
+test every_byte_round_trips {
+    string $all = '';
+    uint8 $b = 0;
+
+    while (true) {
+        $all->push($b);
+
+        if ($b == 255) {
+            break;
+        }
+
+        $b = $b + 1;
+    }
+
+    string $encoded = escape($all);
+
+    assert($encoded->size() == 66 + 190 * 3, 'the 66 unreserved stay, the other 190 become three bytes');
+    assert(unescape($encoded) == $all, 'and every byte comes back');
+    assert(escape("\u{0}") == '%00', 'a zero byte is just another escape');
+}
+
+#[group: "unit"]
+test unescape_at_the_edges {
+    assert(unescape('%4') == '%4', 'one digit is not an escape');
+    assert(unescape('%41%') == 'A%', 'a trailing percent is kept');
+    assert(unescape('a+b') == 'a+b', 'plus is not a space here, this is not form decoding');
+    assert(unescape('') == '', 'nothing');
+}
+
+#[group: "unit"]
+test query_pairs_keep_their_order_and_empties {
+    Query $q = Query();
+    $q->add('b', '');
+    $q->add('a', 'x y');
+    $q->add('a', '1');
+    $q->addInt('n', -3);
+
+    assert($q->encode() == 'b=&a=x%20y&a=1&n=-3', 'an empty value, a repeated name, a negative number');
 }

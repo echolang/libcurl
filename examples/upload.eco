@@ -1,0 +1,35 @@
+// a file upload as multipart/form-data, then where the time went.
+//
+//   echoc run -m . examples/upload.eco
+//   echoc run -m . examples/upload.eco -- http://127.0.0.1:8080/   (any server that echoes)
+
+string $url = 'https://httpbin.org/post';
+
+if (std::env::argc() > 1) {
+    $url = std::env::argv()[1];
+}
+
+string $path = std::env::join(std::env::tmp(), 'libcurl_upload_example.txt');
+
+usize $written = guard std::io::writefile($path, 'the contents of a file on disk\n') else ($e) {
+    die("could not write the fixture: {$e}");
+}
+
+curl::Form $form = curl::Form();
+$form->field('title', 'a field next to a file');
+$form->file('document', $path, 'text/plain');
+$form->upload('generated', 'report.csv', "a,b\n1,2\n");
+
+curl::Request $req = .postForm($url, $form);
+$req->userAgent('libcurl-example/0.1');
+
+curl::Response $res = guard curl::send($req) else ($e) {
+    die("the upload failed: {$e}");
+}
+
+echo "{$res->status} over {$res->version} from {$res->ip}:{$res->port}";
+echo "dns {$res->timings->dns:.3f}s, connect {$res->timings->connect:.3f}s, tls {$res->timings->tls:.3f}s";
+echo "first byte {$res->timings->firstByte:.3f}s, done {$res->seconds:.3f}s, {$res->redirects} redirects";
+echo $res->body;
+
+result<bool, std::io::ioerror> $gone = std::io::remove($path);

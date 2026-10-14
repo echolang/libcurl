@@ -17,9 +17,27 @@ namespace curl;
  */
 public enum LongInfo : int32
 {
-    case responseCode   = 2097154;  // CURLINFO_RESPONSE_CODE
-    case redirectCount  = 2097172;  // CURLINFO_REDIRECT_COUNT
-    case httpVersion    = 2097198;  // CURLINFO_HTTP_VERSION
+    /**
+     * The HTTP status, and what `Response::status` reads. `CURLINFO_RESPONSE_CODE`.
+     */
+    case responseCode = 2097154;
+
+    /**
+     * How many redirects were followed. `Response::redirects`. `CURLINFO_REDIRECT_COUNT`.
+     */
+    case redirectCount = 2097172;
+
+    /**
+     * The port the final hop connected to. `Response::port`. `CURLINFO_PRIMARY_PORT`.
+     */
+    case primaryPort = 2097192;
+
+    /**
+     * The HTTP version the final hop spoke, as the number `HttpVersion::from` takes.
+     * `CURLINFO_HTTP_VERSION`.
+     */
+    case httpVersion = 2097198;
+
 }
 
 /**
@@ -28,19 +46,71 @@ public enum LongInfo : int32
  */
 public enum StringInfo : int32
 {
-    case effectiveUrl  = 1048577;   // CURLINFO_EFFECTIVE_URL
-    case contentType   = 1048594;   // CURLINFO_CONTENT_TYPE
-    case redirectUrl   = 1048607;   // CURLINFO_REDIRECT_URL
-    case primaryIp     = 1048608;   // CURLINFO_PRIMARY_IP
-    case scheme        = 1048625;   // CURLINFO_SCHEME
+    /**
+     * Where the transfer ended up. `Response::url`. `CURLINFO_EFFECTIVE_URL`.
+     */
+    case effectiveUrl = 1048577;
+
+    /**
+     * The response's `Content-Type`, or nothing. `CURLINFO_CONTENT_TYPE`.
+     */
+    case contentType = 1048594;
+
+    /**
+     * Where a redirect would have gone, when `follow` was off. `CURLINFO_REDIRECT_URL`.
+     */
+    case redirectUrl = 1048607;
+
+    /**
+     * The address the final hop connected to. `Response::ip`. `CURLINFO_PRIMARY_IP`.
+     */
+    case primaryIp = 1048608;
+
+    /**
+     * The scheme of the final hop's URL. `CURLINFO_SCHEME`.
+     */
+    case scheme = 1048625;
+
 }
 
 /**
- * Infos answering a C `double`, all of them seconds.
+ * Infos answering a C `double`, all of them seconds since the transfer started.
  */
 public enum DoubleInfo : int32
 {
-    case totalTime       = 3145731; // CURLINFO_TOTAL_TIME
-    case nameLookupTime  = 3145732; // CURLINFO_NAMELOOKUP_TIME
-    case connectTime     = 3145733; // CURLINFO_CONNECT_TIME
+    /**
+     * The whole transfer. `Response::seconds`. `CURLINFO_TOTAL_TIME`.
+     */
+    case totalTime = 3145731;
+
+    /**
+     * Name resolved. `Timings::dns`. `CURLINFO_NAMELOOKUP_TIME`.
+     */
+    case nameLookupTime = 3145732;
+
+    /**
+     * TCP connected. `Timings::connect`. `CURLINFO_CONNECT_TIME`.
+     */
+    case connectTime = 3145733;
+
+    /**
+     * About to send. `Timings::sent`. `CURLINFO_PRETRANSFER_TIME`.
+     */
+    case preTransferTime = 3145734;
+
+    /**
+     * First byte arrived. `Timings::firstByte`. `CURLINFO_STARTTRANSFER_TIME`.
+     */
+    case startTransferTime = 3145745;
+
+    /**
+     * Spent on redirects. `Timings::redirect`. `CURLINFO_REDIRECT_TIME`.
+     */
+    case redirectTime = 3145747;
+
+    /**
+     * TLS handshake done. `Timings::tls`. `CURLINFO_APPCONNECT_TIME`.
+     */
+    case appConnectTime = 3145761;
+
 }

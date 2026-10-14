@@ -1,179 +1,177 @@
 /**
  * Why a transfer didn't happen.
  *
- * An enum, so `guard` / `match` is the call site:
+ * An open integer enum, so `guard` / `match` is the call site:
  *
  *     guard curl::send(.get($url)) else ($e) {
  *         match ($e) {
- *             .timeout($m) => { ... },
+ *             .timeout => { ... },
  *             else => { die("{$e}"); },
  *         }
  *     }
  *
  * Named cases are the CURLcodes this library publishes. `other` is a newer libcurl, or a
- * protocol we don't wrap. Echo has no "enum from a raw value", and a backed enum cannot
- * also carry a leftover integer, so this is a classifier: `from` maps inbound C, `value`
- * hands the ABI number back out.
+ * protocol we don't wrap. `from` always succeeds, and `value()` hands back the integer C
+ * handed us, leftover or not. The sentence is libcurl's, read on demand by `message()`.
  *
- * Every case carries libcurl's sentence. `str::from` is in `from.eco`, so `"{$e}"` renders
- * it and `die("request failed: {$e}")` reads as the sentence it is.
+ * The number on each case is curl's, frozen ABI, with the C name in its docblock so a line
+ * can be checked against `curl.h` at a glance. This enum is the only place those numbers live.
  */
 
 namespace curl;
 
-public enum Error
+#[docs::example: "examples/fileUrl.eco"]
+#[docs::see: ["curl::send", "curl::Response"]]
+/**
+ * Why a transfer didn't happen.
+ *
+ * `send` answers `result<Response, Error>`, so a failure is a value you `guard` or `match`
+ * on, never a `Response` with zeroes in it. A 404 is not an `Error`. The server answered,
+ * and that answer is a `Response`.
+ *
+ * `message()` and `"{$e}"` are libcurl's own sentence for the code, and `value()` is the
+ * CURLcode itself. `Error::from` always succeeds: a number this enum doesn't name is `other`.
+ */
+public enum Error : int32
 {
-    case unsupportedProtocol(string $message);
-    case failedInit(string $message);
-    case urlMalformat(string $message);
-    case couldNotResolveProxy(string $message);
-    case couldNotResolveHost(string $message);
-    case couldNotConnect(string $message);
-    case httpReturnedError(string $message);
-    case writeError(string $message);
-    case outOfMemory(string $message);
-    case timeout(string $message);
-    case sslConnectError(string $message);
-    case fileCouldNotReadFile(string $message);
-    case tooManyRedirects(string $message);
-    case unknownOption(string $message);
-    case peerFailedVerification(string $message);
-    case other(int32 $code, string $message);
+    /**
+     * The URL's scheme is one this libcurl wasn't built with. `CURLE_UNSUPPORTED_PROTOCOL`.
+     */
+    case unsupportedProtocol = 1;
 
     /**
-     * The case that goes with a CURLcode. Unknown numbers become `other`.
+     * libcurl wouldn't hand out a handle, so nothing was sent. `CURLE_FAILED_INIT`.
      */
-    static function from(int32 $n, const string& $message) : Error
-    {
-        if ($n == CODE_UNSUPPORTED_PROTOCOL) {
-            return Error::unsupportedProtocol($message);
-        }
-
-        if ($n == CODE_FAILED_INIT) {
-            return Error::failedInit($message);
-        }
-
-        if ($n == CODE_URL_MALFORMAT) {
-            return Error::urlMalformat($message);
-        }
-
-        if ($n == CODE_COULDNT_RESOLVE_PROXY) {
-            return Error::couldNotResolveProxy($message);
-        }
-
-        if ($n == CODE_COULDNT_RESOLVE_HOST) {
-            return Error::couldNotResolveHost($message);
-        }
-
-        if ($n == CODE_COULDNT_CONNECT) {
-            return Error::couldNotConnect($message);
-        }
-
-        if ($n == CODE_HTTP_RETURNED_ERROR) {
-            return Error::httpReturnedError($message);
-        }
-
-        if ($n == CODE_WRITE_ERROR) {
-            return Error::writeError($message);
-        }
-
-        if ($n == CODE_OUT_OF_MEMORY) {
-            return Error::outOfMemory($message);
-        }
-
-        if ($n == CODE_OPERATION_TIMEDOUT) {
-            return Error::timeout($message);
-        }
-
-        if ($n == CODE_SSL_CONNECT_ERROR) {
-            return Error::sslConnectError($message);
-        }
-
-        if ($n == CODE_FILE_COULDNT_READ_FILE) {
-            return Error::fileCouldNotReadFile($message);
-        }
-
-        if ($n == CODE_TOO_MANY_REDIRECTS) {
-            return Error::tooManyRedirects($message);
-        }
-
-        if ($n == CODE_UNKNOWN_OPTION) {
-            return Error::unknownOption($message);
-        }
-
-        if ($n == CODE_PEER_FAILED_VERIFICATION) {
-            return Error::peerFailedVerification($message);
-        }
-
-        return Error::other($n, $message);
-    }
+    case failedInit = 2;
 
     /**
-     * The CURLcode. `other` returns the number C handed us.
+     * The URL couldn't be parsed. `CURLE_URL_MALFORMAT`.
      */
-    const function value() : int32
-    {
-        return match ($this) {
-            Error::unsupportedProtocol($message) => CODE_UNSUPPORTED_PROTOCOL,
-            Error::failedInit($message) => CODE_FAILED_INIT,
-            Error::urlMalformat($message) => CODE_URL_MALFORMAT,
-            Error::couldNotResolveProxy($message) => CODE_COULDNT_RESOLVE_PROXY,
-            Error::couldNotResolveHost($message) => CODE_COULDNT_RESOLVE_HOST,
-            Error::couldNotConnect($message) => CODE_COULDNT_CONNECT,
-            Error::httpReturnedError($message) => CODE_HTTP_RETURNED_ERROR,
-            Error::writeError($message) => CODE_WRITE_ERROR,
-            Error::outOfMemory($message) => CODE_OUT_OF_MEMORY,
-            Error::timeout($message) => CODE_OPERATION_TIMEDOUT,
-            Error::sslConnectError($message) => CODE_SSL_CONNECT_ERROR,
-            Error::fileCouldNotReadFile($message) => CODE_FILE_COULDNT_READ_FILE,
-            Error::tooManyRedirects($message) => CODE_TOO_MANY_REDIRECTS,
-            Error::unknownOption($message) => CODE_UNKNOWN_OPTION,
-            Error::peerFailedVerification($message) => CODE_PEER_FAILED_VERIFICATION,
-            Error::other($code, $message) => $code,
-        };
-    }
+    case urlMalformat = 3;
+
+    /**
+     * The proxy's hostname didn't resolve. `CURLE_COULDNT_RESOLVE_PROXY`.
+     */
+    case couldNotResolveProxy = 5;
+
+    /**
+     * The hostname didn't resolve. Offline usually looks like this.
+     * `CURLE_COULDNT_RESOLVE_HOST`.
+     */
+    case couldNotResolveHost = 6;
+
+    /**
+     * The host resolved, but nothing accepted the connection. `CURLE_COULDNT_CONNECT`.
+     */
+    case couldNotConnect = 7;
+
+    /**
+     * A status of 400 or above, but only after `set(.failOnError, 1)`. Without it, that status
+     * is a `Response`. `CURLE_HTTP_RETURNED_ERROR`.
+     */
+    case httpReturnedError = 22;
+
+    /**
+     * The body couldn't be written: a `saveTo` path that can't be created or flushed.
+     * `CURLE_WRITE_ERROR`.
+     */
+    case writeError = 23;
+
+    /**
+     * A file part of a `Form` couldn't be read. Caught before anything is sent.
+     * `CURLE_READ_ERROR`.
+     */
+    case readError = 26;
+
+    /**
+     * libcurl ran out of memory, or couldn't grow a header list. `CURLE_OUT_OF_MEMORY`.
+     */
+    case outOfMemory = 27;
+
+    /**
+     * `timeout` or `connectTimeout` ran out. `CURLE_OPERATION_TIMEDOUT`.
+     */
+    case timeout = 28;
+
+    /**
+     * The TLS handshake failed. `CURLE_SSL_CONNECT_ERROR`.
+     */
+    case sslConnectError = 35;
+
+    /**
+     * A `file://` URL, or the file behind `uploadFile`, couldn't be read.
+     * `CURLE_FILE_COULDNT_READ_FILE`.
+     */
+    case fileCouldNotReadFile = 37;
+
+    /**
+     * An `onProgress` or `onChunk` closure answered `false`. This is what cancelling looks
+     * like. `CURLE_ABORTED_BY_CALLBACK`.
+     */
+    case abortedByCallback = 42;
+
+    /**
+     * The request contradicts itself: two bodies at once, a HEAD with a body, a header or form
+     * part that can't go on the wire, a negative `maxBytes`. `CURLE_BAD_FUNCTION_ARGUMENT`.
+     */
+    case badFunctionArgument = 43;
+
+    /**
+     * `follow` took more hops than `maxRedirects` allows. `CURLE_TOO_MANY_REDIRECTS`.
+     */
+    case tooManyRedirects = 47;
+
+    /**
+     * A `set` or `raw` option the installed libcurl doesn't know. `CURLE_UNKNOWN_OPTION`.
+     */
+    case unknownOption = 48;
+
+    /**
+     * The server's certificate or hostname didn't check out. `caFile` is the fix for a private
+     * CA. `CURLE_PEER_FAILED_VERIFICATION`.
+     */
+    case peerFailedVerification = 60;
+
+    /**
+     * The body passed the `maxBytes` cap. `CURLE_FILESIZE_EXCEEDED`.
+     */
+    case filesizeExceeded = 63;
+
+    /**
+     * Any code this enum doesn't name: a newer libcurl, or a protocol this library doesn't
+     * wrap. `value()` still has the number.
+     */
+    case other;
 
     /**
      * What went wrong, in words. libcurl's sentence for the CURLcode.
      */
-    const function message() : string
+    public const function message() : string
     {
-        return match ($this) {
-            Error::unsupportedProtocol($message) => $message,
-            Error::failedInit($message) => $message,
-            Error::urlMalformat($message) => $message,
-            Error::couldNotResolveProxy($message) => $message,
-            Error::couldNotResolveHost($message) => $message,
-            Error::couldNotConnect($message) => $message,
-            Error::httpReturnedError($message) => $message,
-            Error::writeError($message) => $message,
-            Error::outOfMemory($message) => $message,
-            Error::timeout($message) => $message,
-            Error::sslConnectError($message) => $message,
-            Error::fileCouldNotReadFile($message) => $message,
-            Error::tooManyRedirects($message) => $message,
-            Error::unknownOption($message) => $message,
-            Error::peerFailedVerification($message) => $message,
-            Error::other($code, $message) => $message,
-        };
+        return str::from(cStrerror($this->value()));
     }
 }
 
-// the CURLcodes this library names. curl's numbering is frozen ABI, so these are literals
-// with the C name beside them, not something read out of a header at build time
-public const int32 CODE_OK                       = 0;
-public const int32 CODE_UNSUPPORTED_PROTOCOL     = 1;
-public const int32 CODE_FAILED_INIT              = 2;
-public const int32 CODE_URL_MALFORMAT            = 3;
-public const int32 CODE_COULDNT_RESOLVE_PROXY    = 5;
-public const int32 CODE_COULDNT_RESOLVE_HOST     = 6;
-public const int32 CODE_COULDNT_CONNECT          = 7;
-public const int32 CODE_HTTP_RETURNED_ERROR      = 22;
-public const int32 CODE_WRITE_ERROR              = 23;
-public const int32 CODE_OUT_OF_MEMORY            = 27;
-public const int32 CODE_OPERATION_TIMEDOUT       = 28;
-public const int32 CODE_SSL_CONNECT_ERROR        = 35;
-public const int32 CODE_FILE_COULDNT_READ_FILE   = 37;
-public const int32 CODE_TOO_MANY_REDIRECTS       = 47;
-public const int32 CODE_UNKNOWN_OPTION           = 48;
-public const int32 CODE_PEER_FAILED_VERIFICATION = 60;
+// CURLE_OK. not an error, so not a case. `check` is the one place a raw code is read
+internal const int32 CODE_OK = 0;
+
+/**
+ * A CURLcode, as Echo. The one place a raw C answer turns into `status<Error>`.
+ */
+internal function check(int32 $code) : status<Error>
+{
+    if ($code == CODE_OK) {
+        return .ok;
+    }
+
+    return .error(Error::from($code));
+}
+
+#[group: "unit"]
+test check_is_ok_only_for_zero {
+    assert(!check(CODE_OK)->failed(), 'CURLE_OK');
+
+    status<Error> $failed = check(28);
+
+    assert($failed->failed() && $failed->failure() == Error::timeout, 'anything else is the error it names');
+}

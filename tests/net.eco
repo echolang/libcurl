@@ -15,16 +15,16 @@
 function offline(const curl::Error& $e) : bool
 {
     match ($e) {
-        curl::Error::couldNotResolveHost($m) => {
+        curl::Error::couldNotResolveHost => {
             return true;
         },
-        curl::Error::couldNotResolveProxy($m) => {
+        curl::Error::couldNotResolveProxy => {
             return true;
         },
-        curl::Error::couldNotConnect($m) => {
+        curl::Error::couldNotConnect => {
             return true;
         },
-        curl::Error::timeout($m) => {
+        curl::Error::timeout => {
             return true;
         },
         else => {
@@ -94,4 +94,142 @@ test an_unresolvable_host_is_an_error {
     curl::Error $err = $outcome->failure();
 
     assert(!$err->message()->empty(), 'and libcurl said why');
+}
+
+/**
+ * The streaming path over real HTTP: chunks, progress, and a cap the server can't talk its way
+ * past with a missing or compressed `Content-Length`.
+ */
+#[group: "net"]
+test streams_an_http_body {
+    Tally $seen = Tally();
+
+    curl::Request $req = .get('https://example.com/');
+    $req->timeout(15000);
+    $req->onChunk(function(const string& $chunk) : bool {
+        $seen->text->append($chunk);
+
+        return true;
+    });
+    $req->onProgress(function(const curl::Progress& $p) : bool {
+        $seen->calls = $seen->calls + 1;
+
+        return true;
+    });
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+
+    assert($res->body->empty(), 'the closure took the body');
+    assert(!$seen->text->empty(), 'and it arrived');
+    assert($res->bytes == $seen->text->size() as int64, 'bytes counts what the closure saw');
+    assert($seen->calls > 0, 'progress was reported');
+
+    curl::Request $capped = .get('https://example.com/');
+    $capped->timeout(15000);
+    $capped->maxBytes(16);
+
+    result<curl::Response, curl::Error> $over = curl::send($capped);
+
+    if ($over->failed() && offline($over->failure())) {
+        return;
+    }
+
+    assert($over->failed(), 'the page is bigger than sixteen bytes');
+    assert($over->failure() == curl::Error::filesizeExceeded, 'and the cap says so');
+}
+
+/**
+ * What `Response` reads back off the handle, over a real TLS connection. The marks count from
+ * the start, so they can only grow.
+ */
+#[group: "net"]
+test reads_transfer_info {
+    curl::Request $req = .get('https://example.com/');
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+    curl::Timings $t = $res->timings;
+
+    assert($res->version != curl::HttpVersion::none, 'it spoke some HTTP');
+    assert(!$res->ip->empty(), 'to an address');
+    assert($res->port == 443, 'on the https port');
+    assert($res->redirects == 0, 'with nothing to follow');
+    assert($t->dns <= $t->connect, 'resolved before connected');
+    assert($t->connect <= $t->tls, 'connected before the handshake finished');
+    assert($t->tls <= $t->firstByte, 'and all of it before the first byte');
+    assert($t->firstByte <= $res->seconds, 'which came before the end');
+}
+
+#[group: "net"]
+test counts_followed_redirects {
+    curl::Request $req = .get('https://httpbin.org/redirect/2');
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+
+    // httpbin is a shared service. a 5xx there says nothing about this library
+    if ($res->serverError()) {
+        return;
+    }
+
+    assert($res->redirects == 2, 'two hops followed');
+    assert($res->url->ends('/get'), 'to where they led');
+}
+
+/**
+ * A form round-trip. httpbin answers with what it parsed, so the field and the file have to
+ * come back under their names: the boundary, the dispositions, and the streamed file all
+ * have to be right for that.
+ */
+#[group: "net"]
+test posts_a_multipart_form {
+    string $path = fixture('libcurl_form_net.txt', 'streamed from disk');
+
+    curl::Form $form = curl::Form();
+    $form->field('title', 'hello form');
+    $form->file('document', $path);
+
+    curl::Request $req = .postForm('https://httpbin.org/post', $form);
+    $req->timeout(15000);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    cleanup($path);
+
+    if ($outcome->failed()) {
+        assert(offline($outcome->failure()), 'the only acceptable failure here is no network');
+        return;
+    }
+
+    curl::Response $res = $outcome->unwrap();
+
+    if ($res->serverError()) {
+        return;
+    }
+
+    assert($res->success(), 'httpbin took it');
+    assert($res->body->find('"title": "hello form"') < $res->body->size(), 'the field arrived as a form field');
+    assert($res->body->find('"document": "streamed from disk"') < $res->body->size(), 'and the file as a file');
+    assert($res->body->find('multipart/form-data; boundary=') < $res->body->size(), 'with the type libcurl wrote');
 }

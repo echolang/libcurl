@@ -77,3 +77,15 @@ test set_replaces_and_add_appends {
     assert($h->count() == 1, 'set replaced every match, case-insensitively');
     assert(($h->get('Accept') ?? '') == 'three', 'with the new value');
 }
+
+#[group: "unit"]
+test header_safe_refuses_what_would_split_the_line {
+    assert(curl::headerSafe(curl::Header('Accept', 'application/json')), 'an ordinary pair');
+    assert(curl::headerSafe(curl::Header('X-Empty', '')), 'an empty value is fine');
+    assert(!curl::headerSafe(curl::Header('X-Evil', "x\r\nInjected: 1")), 'CRLF in the value');
+    assert(!curl::headerSafe(curl::Header('X-Evil', "x\nInjected: 1")), 'a bare LF in the value');
+    assert(!curl::headerSafe(curl::Header("X-Evil\r\nInjected", '1')), 'CRLF in the name');
+    assert(!curl::headerSafe(curl::Header('X-Zero', "a\u{0}b")), 'a zero byte would cut the C string');
+    assert(!curl::headerSafe(curl::Header('X:Split', '1')), 'a colon in the name');
+    assert(!curl::headerSafe(curl::Header('', '1')), 'an empty name');
+}

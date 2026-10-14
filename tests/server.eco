@@ -1,0 +1,337 @@
+/**
+ * A loopback HTTP server, for the tests that have to see the wire.
+ *
+ * `file://` exercises the plumbing, but the method a request goes out as, its
+ * `Content-Length`, the headers a client merged in, a redirect and a chunked upload only
+ * exist in HTTP. This answers each connection with the next canned reply and records the
+ * raw request it read, so a test can assert on both sides with no network and no
+ * third-party service.
+ *
+ * One request per connection. Every reply should carry `Connection: close`, so libcurl
+ * never tries to put a second request on a socket this side is about to close. Every wait
+ * is bounded by `poll`, so a client that never connects fails the test instead of hanging it.
+ *
+ * POSIX sockets, so darwin and linux. Winsock is a different API, and Windows skips the
+ * wire tests rather than carrying a second server.
+ */
+
+#[if: os != windows]
+
+use std::thread;
+
+internal struct PollFd
+{
+    public int32 $fd;
+    public int16 $events;
+    public int16 $revents;
+}
+
+#[if: family == darwin]
+internal struct SockAddr
+{
+    public uint8 $len;
+    public uint8 $family;
+    public uint16 $port;
+    public uint32 $addr;
+    public uint64 $zero;
+}
+
+internal const int32 SOL_SOCKET = 65535;
+internal const int32 SO_NOSIGPIPE = 4130;
+internal const int32 SEND_FLAGS = 0;
+#[else]
+internal struct SockAddr
+{
+    public uint16 $family;
+    public uint16 $port;
+    public uint32 $addr;
+    public uint64 $zero;
+}
+
+internal const int32 SOL_SOCKET = 1;
+internal const int32 SO_NOSIGPIPE = 0;
+internal const int32 SEND_FLAGS = 16384;    // MSG_NOSIGNAL
+#[end]
+
+internal extern {
+    function socket      as sockOpen(int32 $domain, int32 $type, int32 $protocol) : int32;
+    function setsockopt  as sockSetopt(int32 $fd, int32 $level, int32 $name, ptr<int32> $value, uint32 $len) : int32;
+    function bind        as sockBind(int32 $fd, ptr<SockAddr> $addr, uint32 $len) : int32;
+    function listen      as sockListen(int32 $fd, int32 $backlog) : int32;
+    function accept      as sockAccept(int32 $fd, ptr<SockAddr> $addr, ptr<uint32> $len) : int32;
+    function getsockname as sockName(int32 $fd, ptr<SockAddr> $addr, ptr<uint32> $len) : int32;
+    function recv        as sockRecv(int32 $fd, ptr<uint8> $buf, usize $len, int32 $flags) : int64;
+    function send        as sockSend(int32 $fd, ptr<const uint8> $buf, usize $len, int32 $flags) : int64;
+    function close       as sockClose(int32 $fd) : int32;
+    function poll        as sockPoll(ptr<PollFd> $fds, uint32 $count, int32 $timeoutMs) : int32;
+}
+
+internal const int32 AF_INET = 2;
+internal const int32 SOCK_STREAM = 1;
+internal const int16 POLLIN = 1;
+internal const int32 WAIT_MS = 5000;
+
+// 127.0.0.1 in network order, read as a little-endian word
+internal const uint32 LOOPBACK = 16777343;
+
+private function swap16(uint16 $v) : uint16
+{
+    uint16 $lo = $v & 255;
+    uint16 $hi = $v >> 8;
+
+    return ($lo << 8) | $hi;
+}
+
+private function loopback() : SockAddr
+{
+    #[if: family == darwin]
+    return SockAddr(16, 2, 0, LOOPBACK, 0);
+    #[else]
+    return SockAddr(2, 0, LOOPBACK, 0);
+    #[end]
+}
+
+/**
+ * Waits until `$fd` has something to read. False when the wait ran out.
+ */
+private function readable(int32 $fd) : bool
+{
+    PollFd $p = PollFd($fd, POLLIN, 0);
+
+    return sockPoll(&$p, 1, WAIT_MS) > 0;
+}
+
+private function sendAll(int32 $fd, const string& $bytes) : void
+{
+    usize $done = 0;
+    usize $size = $bytes->size();
+
+    while ($done < $size) {
+        ptr<const uint8> $from = $bytes->data();
+        int64 $sent = sockSend($fd, ptr<const uint8>($from:$ + $done), $size - $done, SEND_FLAGS);
+
+        if ($sent <= 0) {
+            return;
+        }
+
+        $done = $done + ($sent as usize);
+    }
+}
+
+/**
+ * Reads one request: the head, then a body sized by `Content-Length` or ended by a zero
+ * chunk. Answers `100 Continue` when the client is waiting for one.
+ */
+private function readRequest(int32 $fd) : string
+{
+    string $got = '';
+    string $chunk = '';
+    bool $continued = false;
+
+    $chunk->reserve(65536);
+
+    while (true) {
+        usize $end = $got->find('\r\n\r\n');
+
+        if ($end < $got->size()) {
+            curl::Headers $head = curl::parseHeaders($got->sub(0, $end));
+            usize $bodyAt = $end + 4;
+
+            if (!$continued && str::iequals(($head->get('Expect') ?? '')->view(), '100-continue')) {
+                sendAll($fd, 'HTTP/1.1 100 Continue\r\n\r\n');
+                $continued = true;
+            }
+
+            if (str::iequals(($head->get('Transfer-Encoding') ?? '')->view(), 'chunked')) {
+                if ($got->ends('0\r\n\r\n') && $got->size() > $bodyAt) {
+                    return $got;
+                }
+            }
+            else {
+                int64 $length = str::int($head->get('Content-Length') ?? '0') ?? 0;
+
+                if (($got->size() - $bodyAt) as int64 >= $length) {
+                    return $got;
+                }
+            }
+        }
+
+        if (!readable($fd)) {
+            return $got;
+        }
+
+        int64 $n = sockRecv($fd, $chunk->spare(), 65536, 0);
+
+        if ($n <= 0) {
+            return $got;
+        }
+
+        $chunk->commit($n as usize);
+        $got->append($chunk);
+        $chunk->clear();
+    }
+
+    return $got;
+}
+
+/**
+ * A running server. `url()` builds an address on it, and `requests()` waits for the
+ * worker to finish and hands back every raw request it read, in order.
+ */
+internal class Server
+{
+    public int32 $port;
+    private thread::task<array<string>> $worker;
+
+    constructor(int32 $port, mv thread::task<array<string>> $worker)
+    {
+        $this->port = $port;
+        $this->worker = mv $worker;
+    }
+
+    public function url(const string& $path) : string
+    {
+        return "http://127.0.0.1:{$this->port}{$path}";
+    }
+
+    /**
+     * A client pointed at this server. The empty proxy keeps an `http_proxy` in the
+     * environment from routing loopback traffic somewhere else.
+     */
+    public function client() : curl::Client
+    {
+        curl::Client $c = curl::Client();
+        $c->baseUrl = $this->url('');
+        $c->proxy('');
+
+        return $c;
+    }
+
+    public function requests() : array<string>
+    {
+        return $this->worker->wait();
+    }
+}
+
+/**
+ * Starts a server that answers one connection per reply, in order, then stops.
+ */
+internal function serve(const array<string>& $replies) : Server
+{
+    int32 $fd = sockOpen(AF_INET, SOCK_STREAM, 0);
+
+    assert($fd >= 0, 'a socket');
+
+    SockAddr $addr = loopback();
+    uint32 $len = 16;
+
+    assert(sockBind($fd, &$addr, $len) == 0, 'bound to loopback');
+    assert(sockListen($fd, 16) == 0, 'listening');
+    assert(sockName($fd, &$addr, &$len) == 0, 'and the kernel said which port');
+
+    int32 $port = swap16($addr->port) as int32;
+
+    // owned copies, so no string buffer is shared with the thread that made it
+    array<string> $owned = array<string>();
+
+    foreach ($replies as const &$reply) {
+        $owned[] = $reply->clone();
+    }
+
+    thread::task<array<string>> $worker = guard thread::spawn(function[$fd, mv $owned]() : array<string> {
+        array<string> $seen = array<string>();
+
+        foreach ($owned as const &$reply) {
+            if (!readable($fd)) {
+                break;
+            }
+
+            int32 $conn = sockAccept($fd, null, null);
+
+            if ($conn < 0) {
+                break;
+            }
+
+            if (SO_NOSIGPIPE != 0) {
+                int32 $on = 1;
+                sockSetopt($conn, SOL_SOCKET, SO_NOSIGPIPE, &$on, 4);
+            }
+
+            $seen[] = readRequest($conn);
+            sendAll($conn, $reply);
+            sockClose($conn);
+        }
+
+        sockClose($fd);
+
+        return $seen;
+    }) else ($e) {
+        die("could not start the server: {$e->message()}");
+    }
+
+    return Server($port, mv $worker);
+}
+
+/**
+ * A complete HTTP/1.1 reply that closes its connection.
+ */
+internal function reply(int32 $status, const string& $headers, const string& $body) : string
+{
+    return "HTTP/1.1 {$status} X\r\nConnection: close\r\nContent-Length: {$body->size()}\r\n{$headers}\r\n{$body}";
+}
+
+/**
+ * The request line of a raw request, `GET /x HTTP/1.1`.
+ */
+internal function requestLine(const string& $raw) : string
+{
+    usize $end = $raw->find('\r\n');
+
+    return $raw->sub(0, $end);
+}
+
+/**
+ * The body of a raw request, everything after the blank line.
+ */
+internal function requestBody(const string& $raw) : string
+{
+    usize $end = $raw->find('\r\n\r\n');
+
+    if ($end >= $raw->size()) {
+        return '';
+    }
+
+    return $raw->sub($end + 4, $raw->size() - $end - 4);
+}
+
+/**
+ * The headers of a raw request. The request line has no colon, so the parser drops it.
+ */
+internal function requestHeaders(const string& $raw) : curl::Headers
+{
+    usize $end = $raw->find('\r\n\r\n');
+
+    return curl::parseHeaders($raw->sub(0, $end));
+}
+
+#[group: "wire"]
+test the_server_round_trips {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, 'Content-Type: text/plain\r\n', 'hello');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.get('/ping')) else ($e) {
+        die("the loopback request failed: {$e}");
+    }
+
+    array<string> $seen = $srv->requests();
+
+    assert($res->status == 200, 'the canned status');
+    assert($res->body == 'hello', 'the canned body');
+    assert($seen->count() == 1, 'one request reached the server');
+    assert(requestLine($seen[0]) == 'GET /ping HTTP/1.1', 'as a GET of the path');
+}
+
+#[end]

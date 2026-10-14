@@ -33,6 +33,21 @@ public struct Header
     public string $value;
 }
 
+/**
+ * A list of headers in arrival order, looked up case-insensitively.
+ *
+ * ```echo
+ * curl::Headers $h = curl::Headers();
+ * $h->add('Set-Cookie', 'a=1');
+ * $h->add('Set-Cookie', 'b=2');
+ *
+ * echo $h->get('set-cookie') ?? '';   // a=1
+ * echo $h->all('set-cookie')->count(); // 2
+ * ```
+ *
+ * An array, not a map. `Set-Cookie` legitimately repeats, the order is occasionally
+ * meaningful, and a response carries ten to thirty of these, so a scan beats hashing anyway.
+ */
 public struct Headers
 {
     /** In arrival order, duplicates kept. */
@@ -41,17 +56,26 @@ public struct Headers
     /** The status line of the block these came from, `HTTP/1.1 200 OK`, or empty. */
     public string $statusLine;
 
+    /**
+     * No headers, and no status line.
+     */
     constructor()
     {
         $this->items = array<Header>();
         $this->statusLine = '';
     }
 
+    /**
+     * How many headers, duplicates counted.
+     */
     const function count() : usize
     {
         return $this->items->count();
     }
 
+    /**
+     * True when there are none.
+     */
     const function empty() : bool
     {
         return $this->items->empty();
@@ -59,6 +83,10 @@ public struct Headers
 
     /**
      * Appends, keeping any header of the same name that is already here.
+     *
+     * Nothing is checked here. A CR, LF, or zero byte in either half (or a `:` in the name)
+     * is refused when the request is sent, as `.badFunctionArgument`. An empty value is sent
+     * as an empty header, and replaces one libcurl would have written.
      */
     function add(const string& $name, const string& $value) : void
     {
@@ -147,6 +175,9 @@ public struct Headers
         return $found;
     }
 
+    /**
+     * Is there at least one header of this name? Case-insensitive.
+     */
     const function has(const string& $name) : bool
     {
         if ($this->get($name) == null) {
@@ -156,6 +187,9 @@ public struct Headers
         return true;
     }
 
+    /**
+     * Drops every header and the status line.
+     */
     function clear() : void
     {
         $this->items->clear();
@@ -163,7 +197,7 @@ public struct Headers
     }
 
     /**
-     * `Name: value` lines, in order. What a request hands to libcurl.
+     * `Name: value` lines, in order, the way they read on the wire.
      */
     const function lines() : array<string>
     {
@@ -181,6 +215,54 @@ public struct Headers
 
         return $out;
     }
+}
+
+/**
+ * Does any byte of `$text` end a header line early, or cut the C string it becomes?
+ */
+internal function breaksLine(const string& $text) : bool
+{
+    usize $count = $text->size();
+    usize $i = 0;
+
+    while ($i < $count) {
+        uint8 $b = $text->byte($i);
+
+        if ($b == CH_CR || $b == CH_LF || $b == CH_NUL) {
+            return true;
+        }
+
+        $i = $i + 1;
+    }
+
+    return false;
+}
+
+/**
+ * Can this header go on the wire as exactly one line?
+ *
+ * Here's the catch: `lines()` joins name and value as they are. A value holding `\r\n` would
+ * become a second header the caller never wrote, and that's header injection. A zero byte
+ * cuts the `cstr()` libcurl reads, so the header would leave silently shortened. The name
+ * also can't be empty or carry a `:`, or the receiver would split it somewhere else.
+ *
+ * Checked in `apply`, not in `add`. `items` is public, so `add` isn't the only way in.
+ */
+internal function headerSafe(const Header& $header) : bool
+{
+    if ($header->name->empty()) {
+        return false;
+    }
+
+    if ($header->name->find(':') < $header->name->size()) {
+        return false;
+    }
+
+    if (breaksLine($header->name) || breaksLine($header->value)) {
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -269,4 +351,85 @@ public function parseHeaders(const string& $raw) : Headers
     }
 
     return $out;
+}
+
+#[group: "unit"]
+test remove_answers_how_many_went {
+    Headers $h = Headers();
+    $h->add('A', '1');
+    $h->add('b', '2');
+    $h->add('a', '3');
+
+    assert($h->remove('A') == 2, 'both, case-insensitively');
+    assert($h->remove('A') == 0, 'and then none');
+    assert($h->count() == 1 && $h->items[0]->name == 'b', 'the other one stayed');
+}
+
+#[group: "unit"]
+test get_is_the_first_and_all_is_every_one {
+    Headers $h = Headers();
+    $h->add('Via', 'one');
+    $h->add('Via', 'two');
+
+    assert(($h->get('via') ?? '') == 'one', 'get answers the first');
+    assert($h->get('Missing') == null, 'and nothing for a name that is not there');
+    assert($h->all('missing')->empty(), 'all answers an empty list, not nothing');
+}
+
+#[group: "unit"]
+test lines_and_clear {
+    Headers $h = Headers();
+    $h->statusLine = 'HTTP/1.1 200 OK';
+    $h->add('A', '1');
+    $h->add('B', '');
+
+    array<string> $lines = $h->lines();
+
+    assert($lines->count() == 2 && $lines[0] == 'A: 1' && $lines[1] == 'B: ', 'one line per header, as written');
+
+    $h->clear();
+
+    assert($h->empty(), 'clear drops the headers');
+    assert($h->statusLine->empty(), 'and the status line');
+}
+
+#[group: "unit"]
+test parse_keeps_colons_in_values_and_trims_both_ends {
+    Headers $h = parseHeaders("HTTP/1.1 302 Found\r\nLocation:  http://x.example:8080/a  \r\nX-Tight:v\r\nX-Empty:\r\n\r\n");
+
+    assert(($h->get('Location') ?? '') == 'http://x.example:8080/a', 'only the first colon splits');
+    assert(($h->get('X-Tight') ?? '') == 'v', 'no space after the colon is fine');
+    assert($h->has('X-Empty') && ($h->get('X-Empty') ?? 'x')->empty(), 'an empty value is still a header');
+}
+
+#[group: "unit"]
+test parse_accepts_bare_newlines_and_http2 {
+    Headers $h = parseHeaders('HTTP/2 200\ncontent-type: text/plain\nvary: accept\n\n');
+
+    assert($h->statusLine == 'HTTP/2 200', 'an HTTP/2 status line starts a block too');
+    assert($h->count() == 2, 'LF without CR still splits lines');
+    assert(($h->get('Content-Type') ?? '') == 'text/plain', 'lowercase names are found case-insensitively');
+}
+
+#[group: "unit"]
+test parse_drops_a_fold_with_nothing_to_fold_into {
+    Headers $h = parseHeaders("HTTP/1.1 200 OK\r\n  orphan\r\nA: 1\r\n");
+
+    assert($h->count() == 1, 'the orphan continuation is not a header');
+    assert(($h->get('A') ?? '') == '1', 'and does not touch the next one');
+}
+
+#[group: "unit"]
+test parse_skips_the_interim_block {
+    Headers $h = parseHeaders("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nLocation: /n\r\n\r\n");
+
+    assert($h->statusLine == 'HTTP/1.1 201 Created', 'the 100 is not the response');
+    assert($h->count() == 1, 'and brought no headers');
+}
+
+#[group: "unit"]
+test parse_of_nothing_is_empty {
+    Headers $h = parseHeaders('');
+
+    assert($h->empty() && $h->statusLine->empty(), 'no headers, no status line');
 }

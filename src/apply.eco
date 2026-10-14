@@ -43,7 +43,7 @@ internal function libraryDefaults() : array<Opt>
 {
     array<Opt> $out = array<Opt>();
 
-    $out[] = Opt::long(.followRedirects, 1);
+    pushFollow($out, true);
     $out[] = Opt::long(.maxRedirects, 10);
     $out[] = Opt::text(.acceptEncoding, '');
 
@@ -89,22 +89,22 @@ internal function prepare(const Client& $client, const Request& $request) : Requ
 }
 
 // match payload bindings are a `string`, not a `const string&`. the helper copies once
-internal function applyTextOpt(Easy& $easy, StringOption $option, string $value) : int32
+internal function applyTextOpt(Easy& $easy, StringOption $option, string $value) : status<Error>
 {
     return $easy->setString($option, $value);
 }
 
-internal function applyRawStrOpt(Easy& $easy, int32 $option, string $value) : int32
+internal function applyRawStrOpt(Easy& $easy, int32 $option, string $value) : status<Error>
 {
     return $easy->setRaw($option, $value);
 }
 
-internal function applyRawLongOpt(Easy& $easy, int32 $option, int64 $value) : int32
+internal function applyRawLongOpt(Easy& $easy, int32 $option, int64 $value) : status<Error>
 {
     return $easy->setRaw($option, $value);
 }
 
-internal function applyOpt(Easy& $easy, const Opt& $opt) : int32
+internal function applyOpt(Easy& $easy, const Opt& $opt) : status<Error>
 {
     match ($opt) {
         Opt::long($option, $value) => {
@@ -128,76 +128,202 @@ internal function applyOpt(Easy& $easy, const Opt& $opt) : int32
     }
 }
 
-internal function applyOpts(Easy& $easy, const array<Opt>& $opts) : int32
+internal function applyOpts(Easy& $easy, const array<Opt>& $opts) : status<Error>
 {
-    usize $count = $opts->count();
+    foreach ($opts as const &$opt) {
+        guard applyOpt($easy, $opt) else ($e) {
+            return .error($e);
+        }
+    }
+
+    return .ok;
+}
+
+/**
+ * The method's own setopt when it has one, `customRequest` with the wire word otherwise.
+ *
+ * A GET with a body is the one exception. `httpGet` flips the handle back to GET *and* drops
+ * the post fields, so that GET goes out as the word `GET` with the body still attached. Same
+ * as `curl -X GET -d`.
+ */
+internal function applyMethod(Easy& $easy, Method $method, bool $hasBody) : status<Error>
+{
+    if ($method == Method::get && $hasBody) {
+        return $easy->setString(.customRequest, $method->value());
+    }
+
+    LongOption $verb = guard $method->verb() else {
+        return $easy->setString(.customRequest, $method->value());
+    }
+
+    return $easy->setLong($verb, 1);
+}
+
+/**
+ * Every header as one `Name: value` line, or `.badFunctionArgument` for the first one that
+ * would turn into something else on the wire. Checked over `items` rather than in
+ * `Headers::add`, because `items` is public.
+ */
+internal function applyHeaders(Easy& $easy, const Headers& $headers) : status<Error>
+{
+    usize $count = $headers->count();
     usize $i = 0;
 
     while ($i < $count) {
-        int32 $code = applyOpt($easy, $opts[$i]);
+        Header $held = $headers->items[$i];
 
-        if ($code != CODE_OK) {
-            return $code;
+        if (!headerSafe($held)) {
+            return .error(.badFunctionArgument);
         }
 
         $i = $i + 1;
     }
 
-    return CODE_OK;
+    $i = 0;
+
+    while ($i < $count) {
+        guard $easy->addHeader(curlLine($headers->items[$i])) else ($e) {
+            return .error($e);
+        }
+
+        $i = $i + 1;
+    }
+
+    return .ok;
+}
+
+/**
+ * One header as libcurl wants to be handed it.
+ *
+ * Here's the catch: libcurl reads `Name:` with nothing after the colon as "remove this
+ * header", so an empty value would never go out. `Name;` is libcurl's spelling for a header
+ * that is sent with an empty value. It still replaces a header libcurl would have written
+ * itself, which is how `header('Accept', '')` sends an empty `Accept:`.
+ */
+internal function curlLine(const Header& $header) : string
+{
+    string $value = str::trim($header->value);
+
+    if ($value->empty()) {
+        return "{$header->name};";
+    }
+
+    return "{$header->name}: {$header->value}";
+}
+
+/**
+ * Is the body coming from somewhere other than `Request::body`?
+ */
+internal function uploads(const Source& $source) : bool
+{
+    match ($source) {
+        Source::text => {
+            return false;
+        },
+        else => {
+            return true;
+        },
+    }
+}
+
+/**
+ * The method for a streamed body. `Easy::perform` sets `CURLOPT_UPLOAD`, which HTTP spells PUT.
+ * Every other method keeps its own word through `customRequest`, the same as
+ * `curl -T file -X POST`, and no post fields go on at all.
+ */
+internal function applyUpload(Easy& $easy, Method $method) : status<Error>
+{
+    if ($method == Method::put) {
+        return .ok;
+    }
+
+    return $easy->setString(.customRequest, $method->value());
+}
+
+/**
+ * The request's form onto the handle, or nothing when it has none. Every part is checked
+ * first, so a refused one leaves no half-built mime behind.
+ */
+internal function applyForm(Easy& $easy, const Request& $request) : status<Error>
+{
+    Form $form = guard $request->form else {
+        return .ok;
+    }
+
+    foreach ($form->parts as const &$part) {
+        if (!partSafe($part)) {
+            return .error(.badFunctionArgument);
+        }
+    }
+
+    return $easy->setForm($form);
 }
 
 /**
  * Writes one Request onto a handle.
  *
- * Here's the catch: the body goes on before the verb. `CURLOPT_COPYPOSTFIELDS` is an alias of
- * `POSTFIELDS` and flips the handle to POST, so a GET with a body would silently leave as POST
- * if you asserted the verb first. HEAD becomes `noBody`, GET becomes `httpGet`, everything
- * else becomes `customRequest`.
+ * Here's the catch: the body goes on before the verb. `CURLOPT_COPYPOSTFIELDS` flips the
+ * handle to POST, so the verb has to come after it to win. POST, PUT, and PATCH always get a
+ * body, even an empty one, so their `Content-Length` is never missing. A GET with a body goes
+ * out as a custom `GET` (see `applyMethod`). A HEAD with a body is refused: `noBody` would
+ * drop it without a word. A streamed body skips all of that (see `applyUpload`).
+ *
+ * A form is the mirror image: it goes on *after* the verb. `CURLOPT_POST` turns a multipart
+ * handle back into a plain POST, which would send the form as an empty body. There is one
+ * body, so any two of `body`, a form and a streamed source are refused together.
  *
  * Then the stacked options, last write wins.
  */
-internal function apply(Easy& $easy, const Request& $request, const array<Opt>& $opts) : int32
+internal function apply(Easy& $easy, const Request& $request, const array<Opt>& $opts) : status<Error>
 {
-    int32 $code = $easy->setString(.url, $request->url);
-
-    if ($code != CODE_OK) {
-        return $code;
+    guard $easy->setString(.url, $request->url) else ($e) {
+        return .error($e);
     }
 
-    if (!$request->body->empty()) {
-        $code = $easy->setBody($request->body);
+    bool $hasBody = !$request->body->empty();
+    bool $hasForm = $request->form != null;
+    bool $upload = uploads($request->source);
 
-        if ($code != CODE_OK) {
-            return $code;
+    // one body. a streamed source next to `body` would send the stream and drop the string
+    if (($hasForm || $hasBody) && $upload) {
+        return .error(.badFunctionArgument);
+    }
+
+    if ($hasForm && $hasBody) {
+        return .error(.badFunctionArgument);
+    }
+
+    if (($hasBody || $hasForm || $upload) && $request->method == Method::head) {
+        return .error(.badFunctionArgument);
+    }
+
+    if ($upload) {
+        guard applyUpload($easy, $request->method) else ($e) {
+            return .error($e);
         }
-    }
-
-    if ($request->method == 'HEAD') {
-        $code = $easy->setLong(.noBody, 1);
-    }
-    else if ($request->method == 'GET') {
-        $code = $easy->setLong(.httpGet, 1);
     }
     else {
-        $code = $easy->setString(.customRequest, $request->method);
-    }
-
-    if ($code != CODE_OK) {
-        return $code;
-    }
-
-    array<string> $lines = $request->headers->lines();
-    usize $lineCount = $lines->count();
-    usize $j = 0;
-
-    while ($j < $lineCount) {
-        $code = $easy->addHeader($lines[$j]);
-
-        if ($code != CODE_OK) {
-            return $code;
+        if (!$hasForm && ($hasBody || $request->method->carriesBody())) {
+            guard $easy->setBody($request->body) else ($e) {
+                return .error($e);
+            }
         }
 
-        $j = $j + 1;
+        guard applyMethod($easy, $request->method, $hasBody || $hasForm) else ($e) {
+            return .error($e);
+        }
+    }
+
+    guard applyForm($easy, $request) else ($e) {
+        return .error($e);
+    }
+
+    $easy->sink($request->sink);
+    $easy->source($request->source);
+    $easy->progress($request->progress);
+
+    guard applyHeaders($easy, $request->headers) else ($e) {
+        return .error($e);
     }
 
     return applyOpts($easy, $opts);
@@ -210,26 +336,98 @@ internal function collect(Easy& $easy) : Response
     return Response(
         $easy->infoLong(.responseCode),
         $easy->body(),
+        $easy->bytes(),
         $easy->infoString(.effectiveUrl) ?? '',
         $easy->infoDouble(.totalTime),
         parseHeaders($raw),
-        $raw
+        $raw,
+        $easy->infoLong(.redirectCount),
+        HttpVersion::from($easy->infoLong(.httpVersion) as int32),
+        $easy->infoString(.primaryIp) ?? '',
+        $easy->infoLong(.primaryPort),
+        Timings(
+            $easy->infoDouble(.nameLookupTime),
+            $easy->infoDouble(.connectTime),
+            $easy->infoDouble(.appConnectTime),
+            $easy->infoDouble(.preTransferTime),
+            $easy->infoDouble(.startTransferTime),
+            $easy->infoDouble(.redirectTime)
+        )
     );
 }
 
 internal function perform(Easy& $easy, const Request& $request, const array<Opt>& $opts) : result<Response, Error>
 {
-    int32 $code = apply($easy, $request, $opts);
-
-    if ($code != CODE_OK) {
-        return .error($easy->error($code));
+    guard apply($easy, $request, $opts) else ($e) {
+        return .error($e);
     }
 
-    $code = $easy->perform();
-
-    if ($code != CODE_OK) {
-        return .error($easy->error($code));
+    guard $easy->perform() else ($e) {
+        return .error($e);
     }
 
     return .ok(collect($easy));
+}
+
+#[group: "unit"]
+test an_empty_header_value_is_spelled_for_libcurl {
+    assert(curlLine(Header('Accept', 'text/html')) == 'Accept: text/html', 'an ordinary header');
+    assert(curlLine(Header('X-Empty', '')) == 'X-Empty;', 'empty is the semicolon form, or libcurl drops it');
+    assert(curlLine(Header('X-Blank', '  ')) == 'X-Blank;', 'and so is a value of only spaces');
+    assert(curlLine(Header('X-Pad', ' v ')) == 'X-Pad:  v ', 'a value with content goes as written');
+}
+
+#[group: "unit"]
+test merge_replaces_by_name_and_keeps_the_rest {
+    Headers $client = Headers();
+    $client->add('Accept', 'text/html');
+    $client->add('X-Keep', 'k');
+
+    Headers $request = Headers();
+    $request->add('accept', 'application/json');
+
+    Headers $merged = mergeHeaders($client, $request);
+
+    assert($merged->count() == 2, 'the request Accept took the place of the client one');
+    assert(($merged->get('Accept') ?? '') == 'application/json', 'with the request value');
+    assert($merged->items[0]->name == 'X-Keep', 'client headers keep their order, and come first');
+    assert($client->count() == 2, 'and the client defaults were not touched');
+}
+
+#[group: "unit"]
+test only_a_streamed_source_uploads {
+    assert(!uploads(Source::text), 'text is the body string');
+    assert(uploads(Source::file('/x')), 'a file is an upload');
+    assert(uploads(Source::chunks(function() : string { return ''; }, -1)), 'and so is a closure');
+}
+
+#[group: "unit"]
+test a_body_next_to_a_stream_is_refused {
+    Easy $handle = Easy();
+
+    Request $file = .put('https://example.com/', 'and a body');
+    $file->source = .file('/tmp/x');
+
+    status<Error> $refused = apply($handle, $file, array<Opt>());
+
+    assert($refused->failed(), 'two bodies');
+    assert($refused->failure() == Error::badFunctionArgument, 'refused before anything goes out');
+
+    Request $clean = .put('https://example.com/', 'only a body');
+    $clean->uploadFile('/tmp/x');
+
+    assert(!apply($handle, $clean, array<Opt>())->failed(), 'uploadFile clears the body, so the helper never trips it');
+}
+
+#[group: "unit"]
+test a_bad_option_stops_apply_at_that_option {
+    Easy $handle = Easy();
+    Request $req = .get('https://example.com/');
+
+    array<Opt> $opts = array<Opt>();
+    $opts[] = Opt::off(.maxFileSize, -5);
+
+    status<Error> $applied = apply($handle, $req, $opts);
+
+    assert($applied->failed() && $applied->failure() == Error::badFunctionArgument, 'a negative cap fails send');
 }

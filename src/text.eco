@@ -12,7 +12,10 @@
 
 namespace curl;
 
+internal const uint8 CH_NUL = 0;
 internal const uint8 CH_TAB = 9;
+internal const uint8 CH_LF = 10;
+internal const uint8 CH_CR = 13;
 internal const uint8 CH_SPACE = 32;
 internal const uint8 CH_HASH = 35;
 internal const uint8 CH_PERCENT = 37;

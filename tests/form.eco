@@ -1,0 +1,154 @@
+/**
+ * Multipart forms, short of the wire.
+ *
+ * `apply` builds the `curl_mime` without performing, so everything libcurl decides while
+ * building one is reachable offline: a refused part, a file it can't read. What the parts
+ * look like on the wire needs a server, and lives in `net.eco`.
+ */
+
+#[group: "unit"]
+test a_form_builds_its_parts_in_order {
+    curl::Form $form = curl::Form();
+    $form->field('title', 'hello');
+    $form->file('photo', '/tmp/photo.png', 'image/png');
+    $form->upload('notes', 'notes.txt', "a\u{0}b");
+
+    assert($form->count() == 3, 'three parts');
+    assert($form->parts[0]->name == 'title', 'in the order they were added');
+    assert(($form->parts[1]->type ?? '') == 'image/png', 'a type that was given is kept');
+    assert($form->parts[0]->type == null, 'and one that was not is nothing, for libcurl to pick');
+    assert(($form->parts[2]->filename ?? '') == 'notes.txt', 'an in-memory upload carries its filename');
+}
+
+#[group: "unit"]
+test post_form_with_a_form_is_multipart {
+    curl::Form $form = curl::Form();
+    $form->field('a', '1');
+
+    curl::Request $req = .postForm('https://example.com/', $form);
+
+    assert($req->method == curl::Method::post, 'a POST');
+    assert($req->body->empty(), 'with no plain body');
+    assert($req->form != null, 'but a form');
+    assert(!$req->headers->has('Content-Type'), 'and no content type: libcurl writes the boundary');
+}
+
+#[group: "unit"]
+test a_form_with_a_readable_file_is_accepted {
+    string $path = fixture('libcurl_form_upload.txt', 'file body');
+
+    curl::Form $form = curl::Form();
+    $form->field('title', 'hello');
+    $form->field('empty', '');
+    $form->file('doc', $path);
+    $form->upload('blob', 'blob.bin', "zero\u{0}byte", 'application/octet-stream');
+
+    assert(accepted(.postForm('https://example.com/', $form)), 'every part went onto the mime');
+
+    curl::Request $put = .put('https://example.com/', '');
+    $put->body = '';
+    $put->form = $form;
+
+    assert(accepted($put), 'a PUT carries a form too');
+
+    cleanup($path);
+}
+
+#[group: "unit"]
+test a_missing_file_part_is_a_read_error {
+    curl::Form $form = curl::Form();
+    $form->file('doc', fixturePath('libcurl_form_no_such_file'));
+
+    assert(refusedAs(.postForm('https://example.com/', $form), curl::Error::readError), 'libcurl stats the file while the form is built');
+}
+
+#[group: "unit"]
+test a_form_is_the_whole_body {
+    curl::Form $form = curl::Form();
+    $form->field('a', '1');
+
+    curl::Request $both = .postForm('https://example.com/', $form);
+    $both->body = 'and a body';
+
+    assert(refusedAs($both, curl::Error::badFunctionArgument), 'a form next to a body');
+
+    curl::Request $streamed = .postForm('https://example.com/', $form);
+    $streamed->source = .chunks(function() : string { return ''; }, -1);
+
+    assert(refusedAs($streamed, curl::Error::badFunctionArgument), 'a form next to a streamed source');
+
+    curl::Request $head = .head('https://example.com/');
+    $head->form = $form;
+
+    assert(refusedAs($head, curl::Error::badFunctionArgument), 'noBody would drop the form');
+}
+
+#[group: "unit"]
+test a_part_that_would_split_its_headers_is_refused {
+    curl::Form $crlf = curl::Form();
+    $crlf->field("x\r\nInjected: 1", 'v');
+
+    assert(refusedAs(.postForm('https://example.com/', $crlf), curl::Error::badFunctionArgument), 'a CRLF in a name');
+
+    curl::Form $unnamed = curl::Form();
+    $unnamed->field('', 'v');
+
+    assert(refusedAs(.postForm('https://example.com/', $unnamed), curl::Error::badFunctionArgument), 'an empty name');
+
+    curl::Form $nul = curl::Form();
+    $nul->upload('f', "a\u{0}.txt", 'bytes');
+
+    assert(refusedAs(.postForm('https://example.com/', $nul), curl::Error::badFunctionArgument), 'a zero byte in a filename');
+
+    curl::Form $type = curl::Form();
+    $type->upload('f', 'a.txt', 'bytes', "text/plain\nX: 1");
+
+    assert(refusedAs(.postForm('https://example.com/', $type), curl::Error::badFunctionArgument), 'a newline in a type');
+}
+
+#[group: "unit"]
+test a_request_copies_its_form {
+    curl::Form $form = curl::Form();
+    $form->field('a', '1');
+
+    curl::Request $original = .postForm('https://example.com/', $form);
+    curl::Request $copy = $original;
+
+    curl::Form $grown = guard $copy->form else {
+        die('the copy lost its form');
+    }
+
+    $grown->field('b', '2');
+    $copy->form = $grown;
+
+    curl::Form $kept = guard $original->form else {
+        die('the original lost its form');
+    }
+
+    assert($kept->count() == 1, 'the original still has one part');
+}
+
+/**
+ * The mime belongs to the handle until the next request. A `Client` resets between sends,
+ * which has to let go of it, or the second request would go out as the first one's form.
+ */
+#[group: "unit"]
+test a_client_forgets_the_last_form {
+    string $path = fixture('libcurl_form_after.txt', 'plain');
+
+    curl::Form $form = curl::Form();
+    $form->field('a', '1');
+
+    curl::Client $client = curl::Client();
+
+    // whatever file:// makes of a form doesn't matter. the mime was built and bound to the handle
+    result<curl::Response, curl::Error> $first = $client->send(.postForm(std::env::file_url($path), $form));
+
+    curl::Response $second = guard $client->send(.get(std::env::file_url($path))) else ($e) {
+        die("the plain GET after a form failed: {$e}");
+    }
+
+    assert($second->body == 'plain', 'the GET read the file, with no form attached');
+
+    cleanup($path);
+}

@@ -11,7 +11,7 @@
  *
  *     curl::send(.get('https://example.com/'))
  *
- * Echo has no named arguments. Method, URL, body, and headers are fields — they are the HTTP
+ * Echo has no named arguments. Method, URL, body, and headers are fields: they are the HTTP
  * bits that are not a single setopt. Everything else is an `Opt` on `$opts`. Methods like
  * `timeout` and `verifyTls` push. `$req->set(.proxy, 'http://127.0.0.1:8080')` is how a
  * named option this type never heard of as a field still rides through `send`.
@@ -23,17 +23,136 @@
 
 namespace curl;
 
+/**
+ * The HTTP methods, backed by the word that goes on the wire.
+ *
+ * `verb` is the setopt that already means this method to libcurl. GET, HEAD, and POST have
+ * one. Every other method is left out of the map, so it answers nothing and goes out as
+ * `CURLOPT_CUSTOMREQUEST` with `value()`. A method this enum doesn't name (`PROPFIND`)
+ * is `$req->set(.customRequest, 'PROPFIND')`: options go on after the method, so it wins.
+ *
+ * **POST is in the map on purpose.** libcurl keeps a custom method on every redirect it
+ * follows, so a POST written as the word `POST` stays a POST after a 303, minus its body.
+ * libcurl's own POST becomes the GET a 303 asks for.
+ */
+public enum Method : string
+{
+    /**
+     * Fetch. Sent as libcurl's own GET unless the request carries a body.
+     */
+    case get = 'GET';
+
+    /**
+     * Headers only. libcurl is told not to expect a body, and a request body is refused.
+     */
+    case head = 'HEAD';
+
+    /**
+     * Sends `Request::body`, an empty one included.
+     */
+    case post = 'POST';
+
+    /**
+     * Sends `Request::body`, an empty one included. The method an upload uses by default.
+     */
+    case put = 'PUT';
+
+    /**
+     * Sends `Request::body`, an empty one included.
+     */
+    case patch = 'PATCH';
+
+    /**
+     * `Request::del` builds one. A body is allowed and sent.
+     */
+    case delete = 'DELETE';
+
+    /**
+     * Sent as the word `OPTIONS`.
+     */
+    case options = 'OPTIONS';
+
+    /**
+     * Sent as the word `TRACE`.
+     */
+    case trace = 'TRACE';
+
+    /**
+     * Sent as the word `CONNECT`.
+     */
+    case connect = 'CONNECT';
+
+    map verb : LongOption
+    {
+        .get  = .httpGet;
+        .head = .noBody;
+        .post = .post;
+    }
+
+    /**
+     * Does this method always send a body, even an empty one?
+     *
+     * An empty one still goes out with `Content-Length: 0`. Without it, nginx and plenty of
+     * APIs answer a bodyless POST or PUT with 411 Length Required.
+     */
+    public const function carriesBody() : bool
+    {
+        match ($this) {
+            .post => {
+                return true;
+            },
+            .put => {
+                return true;
+            },
+            .patch => {
+                return true;
+            },
+            else => {
+                return false;
+            },
+        }
+    }
+}
+
+#[docs::groups: ["Headers and query", "Options", "Streaming", "Escape hatches"]]
+#[docs::example: "examples/get.eco"]
+/**
+ * One HTTP request, as a value. Build one, then hand it to `curl::send` or `Client::send`.
+ *
+ * Method, URL, body, and headers are fields. Everything else is an `Opt` on `opts`, and the
+ * option helpers (`timeout`, `follow`, `userAgent`, ...) push one for you. The static
+ * constructors cover the common verbs, and the leading dot reaches them:
+ * `curl::send(.get($url))`.
+ *
+ * It copies like any struct. `$b = $a;` is a deep copy, so one request can be the template
+ * for three.
+ */
 public struct Request
 {
-    /** `GET`, `POST`, ... Sent as `CURLOPT_CUSTOMREQUEST` when it isn't GET or HEAD. */
-    public string $method;
+    /**
+     * Sent as `CURLOPT_CUSTOMREQUEST` unless `Method::verb` names a setopt for it. A GET with a
+     * body is the exception: it goes out as a custom `GET`, because `httpGet` drops the body.
+     */
+    public Method $method;
 
     /** Absolute, or relative to a `Client`'s base URL. */
     public string $url;
 
-    /** The request body. Sent verbatim, with its length, so a zero byte in it is just a byte. */
+    /**
+     * The request body. Sent verbatim, with its length, so a zero byte in it is just a byte.
+     *
+     * POST, PUT, and PATCH send it even when it's empty. A HEAD with a body fails `send` with
+     * `.badFunctionArgument`, because libcurl would drop it.
+     */
     public string $body;
 
+    /**
+     * A `multipart/form-data` body, in place of `$body`. Setting both, or pairing it with a
+     * streamed `$source`, fails `send` with `.badFunctionArgument`: there's one body.
+     */
+    public Form? $form;
+
+    /** Sent after the client's, replacing any client header of the same name. */
     public Headers $headers;
 
     /**
@@ -43,25 +162,52 @@ public struct Request
      */
     public array<Opt> $opts;
 
-    constructor(const string& $method, const string& $url)
+    /** Where the response body goes. `.memory`, into `Response::body`, unless you say otherwise. */
+    public Sink $sink;
+
+    /**
+     * Where the request body comes from. Anything but `.text` sends it as an upload, and an
+     * upload next to a non-empty `body` or a `form` fails `send` with `.badFunctionArgument`.
+     */
+    public Source $source;
+
+    /** Called as the transfer moves. Answering `false` stops it with `.abortedByCallback`. */
+    public function<bool(const Progress&)>? $progress;
+
+    /**
+     * A request with this method and URL, and nothing else. The static constructors are the
+     * short spelling for the common verbs, and this is the one for `.options` and friends.
+     */
+    constructor(Method $method, const string& $url)
     {
         $this->method = $method;
         $this->url = $url;
         $this->body = '';
+        $this->form = null;
         $this->headers = Headers();
         $this->opts = array<Opt>();
+        $this->sink = .memory;
+        $this->source = .text;
+        $this->progress = null;
     }
 
     // ---- the verbs ------------------------------------------------------------------------------
 
+    /**
+     * A GET, with no body.
+     */
     static function get(const string& $url) : Request
     {
-        return Request('GET', $url);
+        return Request(.get, $url);
     }
 
+    /**
+     * A POST of `$body`, sent verbatim with its length. No `Content-Type` is set, so add
+     * one, or reach for `postJson` or `postForm`.
+     */
     static function post(const string& $url, const string& $body) : Request
     {
-        Request $out = Request('POST', $url);
+        Request $out = Request(.post, $url);
         $out->body = $body;
 
         return $out;
@@ -72,7 +218,7 @@ public struct Request
      */
     static function postJson(const string& $url, const string& $json) : Request
     {
-        Request $out = Request('POST', $url);
+        Request $out = Request(.post, $url);
         $out->body = $json;
         $out->headers->set('Content-Type', 'application/json');
 
@@ -84,35 +230,55 @@ public struct Request
      */
     static function postForm(const string& $url, const Query& $form) : Request
     {
-        Request $out = Request('POST', $url);
+        Request $out = Request(.post, $url);
         $out->body = $form->encode();
         $out->headers->set('Content-Type', 'application/x-www-form-urlencoded');
 
         return $out;
     }
 
-    static function put(const string& $url, const string& $body) : Request
+    /**
+     * A POST of form parts, files included, as `multipart/form-data`. libcurl writes the
+     * `Content-Type` and its boundary, so this sets no header.
+     */
+    static function postForm(const string& $url, const Form& $form) : Request
     {
-        Request $out = Request('PUT', $url);
-        $out->body = $body;
+        Request $out = Request(.post, $url);
+        $out->form = $form;
 
         return $out;
     }
 
-    static function patch(const string& $url, const string& $body) : Request
+    /**
+     * A PUT of `$body`. For a body that's a file on disk, `uploadFile` streams it instead.
+     */
+    static function put(const string& $url, const string& $body) : Request
     {
-        Request $out = Request('PATCH', $url);
+        Request $out = Request(.put, $url);
         $out->body = $body;
 
         return $out;
     }
 
     /**
+     * A PATCH of `$body`.
+     */
+    static function patch(const string& $url, const string& $body) : Request
+    {
+        Request $out = Request(.patch, $url);
+        $out->body = $body;
+
+        return $out;
+    }
+
+    /**
+     * A DELETE.
+     *
      * `del` rather than `delete`. `delete` reads as a keyword in most of the languages nearby.
      */
     static function del(const string& $url) : Request
     {
-        return Request('DELETE', $url);
+        return Request(.delete, $url);
     }
 
     /**
@@ -120,11 +286,12 @@ public struct Request
      */
     static function head(const string& $url) : Request
     {
-        return Request('HEAD', $url);
+        return Request(.head, $url);
     }
 
     // ---- filling one in --------------------------------------------------------------------------
 
+    #[docs::group: "Headers and query"]
     /**
      * Replaces any header of this name. `$req->headers->add(...)` if you want to keep both.
      */
@@ -133,6 +300,7 @@ public struct Request
         $this->headers->set($name, $value);
     }
 
+    #[docs::group: "Headers and query"]
     /**
      * Appends `?a=1&b=2` to the URL, or `&a=1` when it already carries a query. Fragments stay put.
      */
@@ -141,34 +309,63 @@ public struct Request
         $this->url = appendQuery($this->url, $params->encode());
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * Any `long` option this library names, by its enum. `set(.failOnError, 1)` turns a
+     * 4xx or 5xx into `.httpReturnedError`.
+     */
     function set(LongOption $option, int64 $value) : void
     {
         pushLong($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * Any string option this library names, by its enum.
+     * `set(.unixSocketPath, '/var/run/docker.sock')` talks to a local socket.
+     */
     function set(StringOption $option, const string& $value) : void
     {
         pushStr($this->opts, $option, $value);
     }
 
-    function set(OffOption $option, int64 $value) : void
+    #[docs::group: "Escape hatches"]
+    /**
+     * A `curl_off_t` option. Labelled, because `set(.tcpKeepAlive, 1)` would otherwise match
+     * this and the `long` overload alike, and a leading dot can't say which enum it means.
+     */
+    function set(off: OffOption $option, int64 $value) : void
     {
         pushOff($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
     /**
      * An option this library hasn't named, by number. Applied last among this request's opts.
+     *
+     * A number in curl's `curl_off_t` range (30000 to 39999) goes out as one. An option the
+     * installed libcurl doesn't know fails `send` with `.unknownOption`.
      */
     function raw(int32 $option, int64 $value) : void
     {
         pushRawLong($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * A string option this library hasn't named, by number.
+     */
     function raw(int32 $option, const string& $value) : void
     {
         pushRawStr($this->opts, $option, $value);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * Gives the whole transfer `$ms` milliseconds, then fails it with `.timeout`.
+     *
+     * `0` is libcurl's own default: no limit at all.
+     */
     function timeout(int32 $ms) : void
     {
         int64 $wide = $ms;
@@ -176,6 +373,12 @@ public struct Request
         pushLong($this->opts, .timeoutMs, $wide);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * Gives the connect phase alone `$ms` milliseconds, DNS and TLS handshake included.
+     *
+     * `0` puts back libcurl's built-in 300 seconds. It is not "no limit".
+     */
     function connectTimeout(int32 $ms) : void
     {
         int64 $wide = $ms;
@@ -183,16 +386,22 @@ public struct Request
         pushLong($this->opts, .connectTimeoutMs, $wide);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * Follow redirects, or hand the 3xx back as the response. On by default.
+     *
+     * A 303 turns into a GET without the body, whatever the method was (libcurl 8.13+).
+     */
     function follow(bool $on) : void
     {
-        if ($on) {
-            pushLong($this->opts, .followRedirects, 1);
-        }
-        else {
-            pushLong($this->opts, .followRedirects, 0);
-        }
+        pushFollow($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * How many hops `follow` takes before the transfer fails with `.tooManyRedirects`. The
+     * library default is 10.
+     */
     function maxRedirects(int32 $n) : void
     {
         int64 $wide = $n;
@@ -200,6 +409,7 @@ public struct Request
         pushLong($this->opts, .maxRedirects, $wide);
     }
 
+    #[docs::group: "Options"]
     /**
      * Verify the peer's certificate and hostname.
      *
@@ -211,16 +421,26 @@ public struct Request
         pushVerifyTls($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * The `User-Agent` header, written by libcurl. Some hosts refuse a request without one.
+     */
     function userAgent(const string& $agent) : void
     {
         pushStr($this->opts, .userAgent, $agent);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * Trusts the certificates in this PEM bundle instead of the system's. The fix for a
+     * private CA, where `verifyTls(false)` is the wrong one.
+     */
     function caFile(const string& $path) : void
     {
         pushStr($this->opts, .caInfo, $path);
     }
 
+    #[docs::group: "Options"]
     /**
      * Ask for, and transparently decode, `gzip`/`deflate`. The library default is on.
      * `false` clears the option so a client default does not leak onto this request.
@@ -230,13 +450,172 @@ public struct Request
         pushAcceptEncoding($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * HTTP Basic credentials. Any other scheme is `set(.httpAuth, ...)` on top.
+     */
     function auth(const string& $username, const string& $password) : void
     {
         pushAuth($this->opts, $username, $password);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * Sends the request through this proxy.
+     *
+     * `''` means no proxy at all, even when `http_proxy` is set in the environment.
+     */
     function proxy(const string& $url) : void
     {
         pushStr($this->opts, .proxy, $url);
     }
+
+    #[docs::group: "Options"]
+    /**
+     * Fails the transfer with `.filesizeExceeded` once the body passes `$bytes`.
+     *
+     * Counted as the bytes arrive, after decompression, whatever the sink. libcurl's own check
+     * only trusts `Content-Length`, which a server is free to leave out. `0` lifts a cap a
+     * client set.
+     */
+    function maxBytes(int64 $bytes) : void
+    {
+        pushOff($this->opts, .maxFileSize, $bytes);
+    }
+
+    // ---- streaming ------------------------------------------------------------------------------
+
+    #[docs::group: "Streaming"]
+    /**
+     * Writes the response body to a file instead of `Response::body`. A transfer that fails
+     * removes the file again, so the path holds a whole body or nothing.
+     */
+    function saveTo(const string& $path) : void
+    {
+        $this->sink = .file($path);
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Hands the response body to `$each` one chunk at a time, and keeps none of it. Answer
+     * `false` to stop the transfer.
+     */
+    function onChunk(function<bool(const string&)> $each) : void
+    {
+        $this->sink = .chunks($each);
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Sends a file as the body, read as it goes out. Clears `body`, which would otherwise
+     * look like it was being sent too.
+     */
+    function uploadFile(const string& $path) : void
+    {
+        $this->source = .file($path);
+        $this->body = '';
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Sends whatever `$next` answers, chunk after chunk, until it answers `''`. `$size` is the
+     * total when you know it. `-1` doesn't, and HTTP/1.1 then sends the body chunked.
+     */
+    function uploadStream(function<string()> $next, int64 $size = -1) : void
+    {
+        $this->source = .chunks($next, $size);
+        $this->body = '';
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Called as the transfer moves, roughly once a second and whenever bytes arrive. Answer
+     * `false` to stop it, which is how a transfer gets cancelled.
+     */
+    function onProgress(function<bool(const Progress&)> $report) : void
+    {
+        $this->progress = $report;
+    }
+}
+
+#[group: "unit"]
+test the_verbs_fill_in_what_they_say {
+    assert(Request::get('/a')->method == Method::get, 'get');
+    assert(Request::head('/a')->method == Method::head, 'head');
+    assert(Request::del('/a')->method == Method::delete, 'del is DELETE');
+
+    Request $post = .post('/a', 'p');
+    Request $put = .put('/a', 'u');
+    Request $patch = .patch('/a', 'x');
+
+    assert($post->method == Method::post && $post->body == 'p', 'post');
+    assert($put->method == Method::put && $put->body == 'u', 'put');
+    assert($patch->method == Method::patch && $patch->body == 'x', 'patch');
+    assert($post->headers->empty() && $post->opts->empty(), 'and nothing else');
+
+    Request $json = .postJson('/a', '{}');
+
+    assert(($json->headers->get('Content-Type') ?? '') == 'application/json', 'postJson types its body');
+}
+
+#[group: "unit"]
+test streaming_helpers_set_the_source_and_sink {
+    Request $req = .post('/a', 'a body');
+    $req->uploadFile('/tmp/in');
+
+    assert($req->body->empty(), 'an upload clears the body it replaces');
+
+    match ($req->source) {
+        Source::file($path) => {
+            assert($path == '/tmp/in', 'the path');
+        },
+        else => {
+            assert(false, 'uploadFile is a file source');
+        },
+    }
+
+    $req->body = 'again';
+    $req->uploadStream(function() : string { return ''; }, 12);
+
+    assert($req->body->empty(), 'so does a stream');
+
+    match ($req->source) {
+        Source::chunks($next, $size) => {
+            assert($size == 12, 'with the size it was given');
+        },
+        else => {
+            assert(false, 'uploadStream is a chunk source');
+        },
+    }
+
+    $req->saveTo('/tmp/out');
+
+    match ($req->sink) {
+        Sink::file($path) => {
+            assert($path == '/tmp/out', 'saveTo is a file sink');
+        },
+        else => {
+            assert(false, 'saveTo is a file sink');
+        },
+    }
+}
+
+#[group: "unit"]
+test a_copied_request_is_its_own {
+    Request $template = .get('https://example.com/');
+    $template->header('Accept', 'text/html');
+
+    Request $copy = $template;
+    $copy->header('Accept', 'application/json');
+    $copy->timeout(10);
+
+    assert(($template->headers->get('Accept') ?? '') == 'text/html', 'the template kept its header');
+    assert($template->opts->empty(), 'and none of the copy options');
+}
+
+#[group: "unit"]
+test every_method_says_whether_it_carries_a_body {
+    assert(!Method::head->carriesBody() && !Method::options->carriesBody(), 'HEAD and OPTIONS do not');
+    assert(!Method::trace->carriesBody() && !Method::connect->carriesBody(), 'nor TRACE and CONNECT');
+    assert(Method::delete->verb() == null && Method::options->verb() == null, 'and only GET, HEAD and POST have a verb');
 }

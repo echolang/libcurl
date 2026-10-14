@@ -1,0 +1,44 @@
+// a body that never sits in memory. curl speaks file://, so this streams a file to another
+// file with no network at all, reporting progress on the way, then shows a cap refusing one.
+//
+//   echoc run -m . examples/download.eco
+
+string $source = std::env::join(std::env::tmp(), 'libcurl_download_source.txt');
+string $target = std::env::join(std::env::tmp(), 'libcurl_download_target.txt');
+
+usize $written = guard std::io::writefile($source, str::repeat('a line of the body\n', 50000)) else ($e) {
+    die("could not write the fixture: {$e}");
+}
+
+curl::Request $req = .get(std::env::file_url($source));
+$req->saveTo($target);
+$req->onProgress(function(const curl::Progress& $p) : bool {
+    echo "{$p->downloaded} of {$p->downloadTotal} bytes";
+
+    // answering false here would cancel the transfer
+    return true;
+});
+
+curl::Response $res = guard curl::send($req) else ($e) {
+    die("the download failed: {$e}");
+}
+
+// the body went to the file, so the response holds a count and no bytes
+echo "saved {$res->bytes} bytes, body in memory: {$res->body->size()}";
+
+// the same download with a cap it can't fit under. the partial file is removed again
+curl::Request $capped = .get(std::env::file_url($source));
+$capped->saveTo($target);
+$capped->maxBytes(1024);
+
+result<curl::Response, curl::Error> $over = curl::send($capped);
+
+if ($over->failed()) {
+    curl::Error $err = $over->failure();
+
+    echo "capped: {$err}";
+}
+
+bool $gone = guard std::io::remove($source) else ($e) {
+    die("could not clean up: {$e}");
+}

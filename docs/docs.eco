@@ -1,0 +1,55 @@
+/*
+ * libcurl's docs, built by ecodoc. From the repo root, `ecodoc build`
+ * writes the site to docs/dist.
+ */
+
+#[module: "docs"]
+
+#[docs::title: "libcurl"]
+#[docs::description: "HTTP for Echo, on top of the C library everyone already has."]
+#[docs::repo: "https://github.com/echolang/libcurl"]
+#[docs::edit: "https://github.com/echolang/libcurl/edit/master/docs/{path}"]
+#[docs::source: "https://github.com/echolang/libcurl/blob/master"]
+#[docs::url: "https://echolang.github.io/libcurl"]
+#[docs::nav: [
+    { text: "Guide", link: "/guide/" },
+    { text: "API", link: "/api/" },
+    { text: "Echo", link: "https://echoc.dev" }
+]]
+#[docs::sidebar: [{ base: "/guide/", items: [
+    { text: "Start", items: [
+        { text: "Getting started", link: "/guide/" },
+        { text: "Finding libcurl", link: "/guide/install" }
+    ] },
+    { text: "Requests", items: [
+        { text: "Requests", link: "/guide/request" },
+        { text: "Headers", link: "/guide/headers" },
+        { text: "Query strings", link: "/guide/query" },
+        { text: "Forms", link: "/guide/forms" },
+        { text: "Everyday options", link: "/guide/options" }
+    ] },
+    { text: "Responses", items: [
+        { text: "Responses", link: "/guide/response" },
+        { text: "Errors", link: "/guide/errors" }
+    ] },
+    { text: "Streaming", items: [
+        { text: "Downloads", link: "/guide/download" },
+        { text: "Uploads", link: "/guide/upload" },
+        { text: "Progress and cancelling", link: "/guide/progress" }
+    ] },
+    { text: "Clients", items: [
+        { text: "Clients", link: "/guide/client" },
+        { text: "How options stack", link: "/guide/stacking" },
+        { text: "How URLs join", link: "/guide/urls" }
+    ] },
+    { text: "Below the API", items: [
+        { text: "Options by name", link: "/guide/set" },
+        { text: "Options by number", link: "/guide/raw" },
+        { text: "An Easy handle", link: "/guide/easy" }
+    ] },
+    { text: "Project", items: [
+        { text: "What isn't here", link: "/guide/limits" }
+    ] }
+] }]]
+#[docs::api: { manifest: "../module.eco", visibility: public, autolink: true }]
+#[docs::footer: { message: "MIT. Built with ecodoc." }]

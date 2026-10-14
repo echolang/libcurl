@@ -17,14 +17,38 @@
 
 namespace curl;
 
+#[docs::groups: ["Defaults", "Sending", "Options", "Escape hatches"]]
+#[docs::example: "examples/client.eco"]
+/**
+ * One connection, plus the defaults every request sent through it shares.
+ *
+ * A client holds one libcurl handle, which keeps the TCP connection, the DNS answer, and the
+ * TLS session alive between requests. On top of that it holds a base URL, headers, and the
+ * same `Opt` list a `Request` carries. The request always wins: its options go on after the
+ * client's, and its headers replace the client's of the same name.
+ *
+ * It's a class, so two names for one client are two names for one connection.
+ */
 public class Client
 {
     private Easy $easy;
 
+    /** Sent with every request. A request header of the same name replaces one of these. */
     public Headers $headers;
+
+    /**
+     * What a relative request URL is joined onto. Empty means every request URL has to be
+     * absolute.
+     */
     public string $baseUrl;
+
+    /** Applied after the library defaults and before the request's own list. */
     public array<Opt> $opts;
 
+    /**
+     * A client with no base URL, no headers, and no options of its own. The library
+     * defaults still apply.
+     */
     constructor()
     {
         $this->easy = Easy();
@@ -33,6 +57,7 @@ public class Client
         $this->opts = array<Opt>();
     }
 
+    #[docs::group: "Sending"]
     /**
      * False when libcurl wouldn't give us a handle. Every `send` then fails with the reason.
      */
@@ -41,6 +66,7 @@ public class Client
         return $this->easy->open();
     }
 
+    #[docs::group: "Defaults"]
     /**
      * A header every request carries, unless the request sets one of the same name itself.
      */
@@ -49,21 +75,36 @@ public class Client
         $this->headers->set($name, $value);
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * Any `long` option this library names, as a default for every request.
+     * `set(.tcpKeepAlive, 1)` keeps an idle connection probed.
+     */
     function set(LongOption $option, int64 $value) : void
     {
         pushLong($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * Any string option this library names, as a default for every request.
+     */
     function set(StringOption $option, const string& $value) : void
     {
         pushStr($this->opts, $option, $value);
     }
 
-    function set(OffOption $option, int64 $value) : void
+    #[docs::group: "Escape hatches"]
+    /**
+     * A `curl_off_t` option. Labelled, because `set(.tcpKeepAlive, 1)` would otherwise match
+     * this and the `long` overload alike, and a leading dot can't say which enum it means.
+     */
+    function set(off: OffOption $option, int64 $value) : void
     {
         pushOff($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
     /**
      * An option this library hasn't named, by number. Replayed after every reset.
      *
@@ -76,11 +117,20 @@ public class Client
         pushRawLong($this->opts, $option, $value);
     }
 
+    #[docs::group: "Escape hatches"]
+    /**
+     * A string option this library hasn't named, by number. Replayed after every reset.
+     */
     function raw(int32 $option, const string& $value) : void
     {
         pushRawStr($this->opts, $option, $value);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::timeout`: the whole transfer gets `$ms` milliseconds. `0` is
+     * no limit.
+     */
     function timeout(int32 $ms) : void
     {
         int64 $wide = $ms;
@@ -88,6 +138,11 @@ public class Client
         pushLong($this->opts, .timeoutMs, $wide);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::connectTimeout`: the connect phase gets `$ms` milliseconds.
+     * `0` is libcurl's built-in 300 seconds.
+     */
     function connectTimeout(int32 $ms) : void
     {
         int64 $wide = $ms;
@@ -95,16 +150,19 @@ public class Client
         pushLong($this->opts, .connectTimeoutMs, $wide);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::follow`. Following is already on unless you turn it off.
+     */
     function follow(bool $on) : void
     {
-        if ($on) {
-            pushLong($this->opts, .followRedirects, 1);
-        }
-        else {
-            pushLong($this->opts, .followRedirects, 0);
-        }
+        pushFollow($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::maxRedirects`. The library's own is 10.
+     */
     function maxRedirects(int32 $n) : void
     {
         int64 $wide = $n;
@@ -112,36 +170,75 @@ public class Client
         pushLong($this->opts, .maxRedirects, $wide);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::verifyTls`. Turn it off only for a known-bad host.
+     */
     function verifyTls(bool $on) : void
     {
         pushVerifyTls($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * The `User-Agent` every request sends, unless it sets its own.
+     */
     function userAgent(const string& $agent) : void
     {
         pushStr($this->opts, .userAgent, $agent);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::caFile`: trust this PEM bundle instead of the system's.
+     */
     function caFile(const string& $path) : void
     {
         pushStr($this->opts, .caInfo, $path);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::acceptEncoding`. Compression is already on unless you turn
+     * it off.
+     */
     function acceptEncoding(bool $on) : void
     {
         pushAcceptEncoding($this->opts, $on);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * HTTP Basic credentials for every request sent through this client.
+     */
     function auth(const string& $username, const string& $password) : void
     {
         pushAuth($this->opts, $username, $password);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A default for `Request::proxy`. `''` means no proxy, even when `http_proxy` is set.
+     */
     function proxy(const string& $url) : void
     {
         pushStr($this->opts, .proxy, $url);
     }
 
+    #[docs::group: "Options"]
+    /**
+     * A byte cap on every response body. A request's own `maxBytes` overrides it, `0` included.
+     */
+    function maxBytes(int64 $bytes) : void
+    {
+        pushOff($this->opts, .maxFileSize, $bytes);
+    }
+
+    #[docs::group: "Sending"]
+    #[docs::outcomes: {
+        ok: "The transfer finished. Any HTTP status, a 404 included.",
+        fail: "The transfer itself didn't happen: DNS, connect, TLS, a timeout, a refused option."
+    }]
     /**
      * Runs a request on this client's connection.
      *
@@ -151,7 +248,7 @@ public class Client
     function send(const Request& $request) : result<Response, Error>
     {
         if (!$this->easy->open()) {
-            return .error(Error::failedInit('libcurl would not open a handle'));
+            return .error(.failedInit);
         }
 
         // reset keeps the connection and drops every option, so one request can't leak
@@ -166,6 +263,10 @@ public class Client
     }
 }
 
+#[docs::outcomes: {
+    ok: "The transfer finished. Any HTTP status, a 404 included.",
+    fail: "The transfer itself didn't happen: DNS, connect, TLS, a timeout, a refused option."
+}]
 /**
  * Runs one request on a handle of its own.
  *
@@ -181,7 +282,7 @@ public function send(const Request& $request) : result<Response, Error>
     Easy $once = Easy();
 
     if (!$once->open()) {
-        return .error(Error::failedInit('libcurl would not open a handle'));
+        return .error(.failedInit);
     }
 
     array<Opt> $empty = array<Opt>();
@@ -196,4 +297,29 @@ public function send(const Request& $request) : result<Response, Error>
 public function version() : string
 {
     return str::from(cVersion());
+}
+
+#[group: "unit"]
+test the_version_is_libcurls_own {
+    assert(version()->starts('libcurl/'), 'curl_version starts with the library name');
+}
+
+#[group: "unit"]
+test client_helpers_push_what_they_say {
+    Client $c = Client();
+    $c->timeout(5);
+    $c->connectTimeout(6);
+    $c->follow(true);
+    $c->maxRedirects(3);
+    $c->verifyTls(true);
+    $c->userAgent('a');
+    $c->caFile('/ca.pem');
+    $c->acceptEncoding(true);
+    $c->proxy('');
+    $c->maxBytes(100);
+    $c->header('X', '1');
+
+    assert($c->opts->count() == 11, 'one each, two for TLS');
+    assert($c->headers->count() == 1, 'headers are not options');
+    assert($c->open(), 'and the handle is there');
 }

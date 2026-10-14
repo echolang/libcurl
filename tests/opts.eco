@@ -65,7 +65,7 @@ test library_defaults_are_follow_hops_and_compression {
     array<curl::Opt> $defaults = curl::libraryDefaults();
 
     assert($defaults->count() == 3, 'three library defaults');
-    assert(isLong($defaults[0], curl::LongOption::followRedirects, 1), 'follow');
+    assert(isLong($defaults[0], curl::LongOption::followRedirects, 2), 'follow, obeying the redirect code');
     assert(isLong($defaults[1], curl::LongOption::maxRedirects, 10), 'ten hops');
     assert(isStr($defaults[2], curl::StringOption::acceptEncoding, ''), 'ask for compression');
 }
@@ -212,4 +212,36 @@ test proxy_is_just_a_string_option {
 
     assert(isStr($req->opts[0], curl::StringOption::proxy, 'http://127.0.0.1:8080'), 'proxy');
     assert(isStr($req->opts[1], curl::StringOption::unixSocketPath, '/var/run/docker.sock'), 'and any other named string');
+}
+
+#[group: "unit"]
+test get_head_and_post_have_a_verb_setopt {
+    curl::LongOption $get = guard curl::Method::get->verb();
+    curl::LongOption $head = guard curl::Method::head->verb();
+    curl::LongOption $post = guard curl::Method::post->verb();
+
+    assert($get == curl::LongOption::httpGet, 'GET is httpGet');
+    assert($head == curl::LongOption::noBody, 'HEAD is noBody');
+    assert($post == curl::LongOption::post, 'POST is libcurl\'s own POST, so a 303 turns it into GET');
+    assert(curl::Method::put->verb() == null, 'everything else is customRequest');
+    assert(curl::Method::delete->value() == 'DELETE', 'with the word on the wire');
+}
+
+#[group: "unit"]
+test post_put_and_patch_always_carry_a_body {
+    assert(curl::Method::post->carriesBody(), 'POST');
+    assert(curl::Method::put->carriesBody(), 'PUT');
+    assert(curl::Method::patch->carriesBody(), 'PATCH');
+    assert(!curl::Method::get->carriesBody(), 'not GET');
+    assert(!curl::Method::delete->carriesBody(), 'not DELETE');
+}
+
+#[group: "unit"]
+test follow_obeys_the_redirect_code {
+    curl::Request $req = .get('https://example.com/');
+    $req->follow(true);
+    $req->follow(false);
+
+    assert(isLong($req->opts[0], curl::LongOption::followRedirects, 2), 'on is CURLFOLLOW_OBEYCODE');
+    assert(isLong($req->opts[1], curl::LongOption::followRedirects, 0), 'off is off');
 }

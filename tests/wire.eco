@@ -1,0 +1,751 @@
+/**
+ * What actually goes out, and what comes back, over real HTTP on loopback.
+ *
+ * Every test here starts a `Server` from `server.eco`, sends through the library, and then
+ * reads the raw request the server recorded. That's the only place the method word, the
+ * `Content-Length`, a merged header or a chunked upload can be seen, and none of it needs
+ * a network or anybody else's service.
+ */
+
+#[if: os != windows]
+
+function ok(const string& $body) : array<string>
+{
+    array<string> $out = array<string>();
+    $out[] = reply(200, '', $body);
+
+    return $out;
+}
+
+function sent(Server& $srv, const curl::Request& $req) : string
+{
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send($req) else ($e) {
+        die("the loopback request failed: {$e}");
+    }
+
+    array<string> $seen = $srv->requests();
+
+    assert($seen->count() == 1, 'exactly one request reached the server');
+
+    return $seen[0];
+}
+
+function bytesOf(const array<uint8>& $raw) : string
+{
+    string $out = '';
+
+    foreach ($raw as $b) {
+        $out->push($b);
+    }
+
+    return $out;
+}
+
+// ---- methods and bodies ---------------------------------------------------------------------
+
+#[group: "wire"]
+test a_get_has_no_body {
+    Server $srv = serve(ok(''));
+    string $raw = sent($srv, .get('/items?page=2'));
+
+    assert(requestLine($raw) == 'GET /items?page=2 HTTP/1.1', 'the verb, the path and the query');
+    assert(!requestHeaders($raw)->has('Content-Length'), 'and no length, because there is no body');
+    assert(requestBody($raw)->empty(), 'and nothing after the head');
+}
+
+#[group: "wire"]
+test a_post_sends_its_body_verbatim {
+    Server $srv = serve(ok(''));
+    string $body = "a=1\u{0}b=2";
+    string $raw = sent($srv, .post('/submit', $body));
+
+    assert(requestLine($raw) == 'POST /submit HTTP/1.1', 'a POST');
+    assert((requestHeaders($raw)->get('Content-Length') ?? '') == '7', 'the zero byte counts');
+    assert(requestBody($raw) == $body, 'and goes out, the body is not cut at it');
+}
+
+#[group: "wire"]
+test empty_post_put_and_patch_say_content_length_zero {
+    Server $post = serve(ok(''));
+    string $p = sent($post, curl::Request(.post, '/x'));
+
+    assert(requestLine($p) == 'POST /x HTTP/1.1', 'a POST');
+    assert((requestHeaders($p)->get('Content-Length') ?? '') == '0', 'with an explicit zero');
+
+    Server $put = serve(ok(''));
+    string $u = sent($put, .put('/x', ''));
+
+    assert(requestLine($u) == 'PUT /x HTTP/1.1', 'a PUT');
+    assert((requestHeaders($u)->get('Content-Length') ?? '') == '0', 'with an explicit zero');
+
+    Server $patch = serve(ok(''));
+    string $a = sent($patch, .patch('/x', ''));
+
+    assert(requestLine($a) == 'PATCH /x HTTP/1.1', 'a PATCH');
+    assert((requestHeaders($a)->get('Content-Length') ?? '') == '0', 'with an explicit zero');
+}
+
+#[group: "wire"]
+test put_and_patch_carry_their_bodies {
+    Server $put = serve(ok(''));
+    string $u = sent($put, .put('/doc', '{"v":1}'));
+
+    assert(requestLine($u) == 'PUT /doc HTTP/1.1', 'the PUT word');
+    assert(requestBody($u) == '{"v":1}', 'with its body');
+
+    Server $patch = serve(ok(''));
+    string $a = sent($patch, .patch('/doc', '{"v":2}'));
+
+    assert(requestLine($a) == 'PATCH /doc HTTP/1.1', 'the PATCH word');
+    assert(requestBody($a) == '{"v":2}', 'with its body');
+}
+
+#[group: "wire"]
+test delete_and_options_go_out_by_name {
+    Server $del = serve(ok(''));
+    string $d = sent($del, .del('/items/7'));
+
+    assert(requestLine($d) == 'DELETE /items/7 HTTP/1.1', 'DELETE');
+    assert(requestBody($d)->empty(), 'with no body');
+
+    Server $opts = serve(ok(''));
+    string $o = sent($opts, curl::Request(.options, '/items'));
+
+    assert(requestLine($o) == 'OPTIONS /items HTTP/1.1', 'OPTIONS');
+}
+
+#[group: "wire"]
+test a_delete_can_carry_a_body {
+    Server $srv = serve(ok(''));
+    curl::Request $req = .del('/items');
+    $req->body = '[1,2]';
+
+    string $raw = sent($srv, $req);
+
+    assert(requestLine($raw) == 'DELETE /items HTTP/1.1', 'still a DELETE');
+    assert(requestBody($raw) == '[1,2]', 'with the body');
+}
+
+#[group: "wire"]
+test a_get_with_a_body_stays_a_get {
+    Server $srv = serve(ok(''));
+    curl::Request $req = .get('/search');
+    $req->body = '{"q":1}';
+
+    string $raw = sent($srv, $req);
+
+    assert(requestLine($raw) == 'GET /search HTTP/1.1', 'the word is GET, not POST');
+    assert(requestBody($raw) == '{"q":1}', 'and the body went with it');
+}
+
+#[group: "wire"]
+test a_head_reads_no_body {
+    array<string> $replies = array<string>();
+    $replies[] = 'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 42\r\nX-Head: yes\r\n\r\n';
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.head('/x')) else ($e) {
+        die("the HEAD failed: {$e}");
+    }
+
+    array<string> $seen = $srv->requests();
+
+    assert(requestLine($seen[0]) == 'HEAD /x HTTP/1.1', 'a HEAD');
+    assert($res->body->empty(), 'libcurl did not wait for the 42 bytes');
+    assert(($res->header('X-Head') ?? '') == 'yes', 'and the headers came back');
+}
+
+#[group: "wire"]
+test a_custom_method_rides_through_set {
+    Server $srv = serve(ok(''));
+    curl::Request $req = .get('/dav');
+    $req->set(.customRequest, 'PROPFIND');
+
+    string $raw = sent($srv, $req);
+
+    assert(requestLine($raw) == 'PROPFIND /dav HTTP/1.1', 'the option went on after the method, so it won');
+}
+
+// ---- headers -----------------------------------------------------------------------------------
+
+#[group: "wire"]
+test client_and_request_headers_merge_on_the_wire {
+    Server $srv = serve(ok(''));
+    curl::Client $c = $srv->client();
+    $c->header('Accept', 'text/html');
+    $c->header('X-Client', 'kept');
+
+    curl::Request $req = .get('/h');
+    $req->header('accept', 'application/json');
+    $req->headers->add('X-Twice', 'one');
+    $req->headers->add('X-Twice', 'two');
+
+    curl::Response $res = guard $c->send($req) else ($e) {
+        die("the request failed: {$e}");
+    }
+
+    curl::Headers $h = requestHeaders($srv->requests()[0]);
+
+    assert($h->all('Accept')->count() == 1, 'the request replaced the client Accept, it did not add a second');
+    assert(($h->get('Accept') ?? '') == 'application/json', 'with its own value');
+    assert(($h->get('X-Client') ?? '') == 'kept', 'an untouched client header still went out');
+    assert($h->all('X-Twice')->count() == 2, 'and request duplicates are both there');
+}
+
+/**
+ * libcurl reads `Name:` with nothing after it as "remove this header". An empty value has
+ * to go out as written, and replace the header libcurl would have sent in its place.
+ */
+#[group: "wire"]
+test an_empty_header_still_goes_out {
+    Server $srv = serve(ok(''));
+    curl::Request $req = .get('/e');
+    $req->header('X-Empty', '');
+    $req->header('Accept', '');
+
+    string $raw = sent($srv, $req);
+    curl::Headers $h = requestHeaders($raw);
+
+    assert($h->has('X-Empty'), 'the empty header was sent');
+    assert(($h->get('X-Empty') ?? 'x')->empty(), 'empty');
+    assert($h->all('Accept')->count() == 1, 'one Accept');
+    assert(($h->get('Accept') ?? 'x')->empty(), 'the empty one, in place of libcurl\'s */*');
+}
+
+#[group: "wire"]
+test an_empty_path_is_the_base_url_itself {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, '', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->baseUrl = $srv->url('/v1/status?key=abc');
+
+    curl::Response $res = guard $c->send(.get('')) else ($e) {
+        die("the request failed: {$e}");
+    }
+
+    assert(requestLine($srv->requests()[0]) == 'GET /v1/status?key=abc HTTP/1.1', 'no slash glued onto the query');
+}
+
+#[group: "wire"]
+test a_relative_path_joins_the_base_path_not_its_query {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, '', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->baseUrl = $srv->url('/v1?key=abc');
+
+    curl::Response $res = guard $c->send(.get('users')) else ($e) {
+        die("the request failed: {$e}");
+    }
+
+    assert(requestLine($srv->requests()[0]) == 'GET /v1/users HTTP/1.1', 'the path grew, the base query did not swallow it');
+}
+
+#[group: "wire"]
+test a_client_cap_set_by_option_holds {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, '', str::repeat('z', 100));
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->set(off: .maxFileSize, 50);
+    $c->set(.tcpKeepAlive, 1);
+
+    result<curl::Response, curl::Error> $outcome = $c->send(.get('/big'));
+
+    $srv->requests();
+
+    assert($outcome->failed(), 'a hundred bytes is over fifty');
+    assert($outcome->failure() == curl::Error::filesizeExceeded, 'set(off:) reaches the same cap as maxBytes');
+}
+
+#[group: "wire"]
+test json_and_urlencoded_posts_are_typed {
+    Server $json = serve(ok(''));
+    string $j = sent($json, .postJson('/j', '{"a":1}'));
+
+    assert((requestHeaders($j)->get('Content-Type') ?? '') == 'application/json', 'json');
+    assert(requestBody($j) == '{"a":1}', 'with the document as the body');
+
+    curl::Query $q = curl::Query();
+    $q->add('name', 'echo lang');
+    $q->add('tag', 'a&b');
+
+    Server $form = serve(ok(''));
+    string $f = sent($form, .postForm('/f', $q));
+
+    assert((requestHeaders($f)->get('Content-Type') ?? '') == 'application/x-www-form-urlencoded', 'urlencoded');
+    assert(requestBody($f) == 'name=echo%20lang&tag=a%26b', 'with the pairs encoded');
+}
+
+#[group: "wire"]
+test user_agent_and_basic_auth_go_out {
+    Server $srv = serve(ok(''));
+    curl::Request $req = .get('/me');
+    $req->userAgent('libcurl-test/1');
+    $req->auth('user', 'secret');
+
+    curl::Headers $h = requestHeaders(sent($srv, $req));
+
+    assert(($h->get('User-Agent') ?? '') == 'libcurl-test/1', 'the agent');
+    assert(($h->get('Authorization') ?? '') == 'Basic dXNlcjpzZWNyZXQ=', 'basic auth, base64 of user:secret');
+}
+
+#[group: "wire"]
+test compression_is_asked_for_unless_turned_off {
+    Server $on = serve(ok(''));
+    curl::Headers $asked = requestHeaders(sent($on, .get('/z')));
+
+    assert($asked->has('Accept-Encoding'), 'the library default asks for compression');
+
+    Server $off = serve(ok(''));
+    curl::Request $req = .get('/z');
+    $req->acceptEncoding(false);
+
+    curl::Headers $plain = requestHeaders(sent($off, $req));
+
+    assert(!$plain->has('Accept-Encoding'), 'false clears the default, it does not send an empty one');
+}
+
+#[group: "wire"]
+test a_gzip_body_arrives_decoded {
+    array<uint8> $gz = [31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 203, 72, 205, 201, 201, 87, 200, 192, 78, 2, 0, 246, 210, 83, 56, 29, 0, 0, 0];
+
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, 'Content-Encoding: gzip\r\n', bytesOf($gz));
+    $replies[] = reply(200, 'Content-Encoding: gzip\r\n', bytesOf($gz));
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.get('/gz')) else ($e) {
+        die("the gzip request failed: {$e}");
+    }
+
+    assert($res->body == 'hello hello hello hello hello', 'libcurl inflated it');
+    assert($res->bytes == 29, 'and bytes counts what was delivered, not what was on the wire');
+
+    // 29 compressed bytes fit under 20 only before they're inflated. the cap is on what arrives
+    curl::Request $capped = .get('/gz');
+    $capped->maxBytes(20);
+
+    result<curl::Response, curl::Error> $over = $c->send($capped);
+
+    assert($over->failed(), 'the inflated body is over the cap');
+    assert($over->failure() == curl::Error::filesizeExceeded, 'and says so');
+}
+
+// ---- responses ---------------------------------------------------------------------------------
+
+#[group: "wire"]
+test statuses_sort_into_their_classes {
+    array<string> $replies = array<string>();
+    $replies[] = reply(201, '', '');
+    $replies[] = reply(404, '', 'missing');
+    $replies[] = reply(503, '', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $created = guard $c->send(.get('/a')) else ($e) { die("{$e}"); }
+    curl::Response $missing = guard $c->send(.get('/b')) else ($e) { die("{$e}"); }
+    curl::Response $down = guard $c->send(.get('/c')) else ($e) { die("{$e}"); }
+
+    assert($created->status == 201 && $created->success(), '201 is a success');
+    assert($missing->status == 404 && $missing->clientError() && !$missing->success(), '404 is the client');
+    assert($missing->body == 'missing', 'and a 404 still has its body, it is a response');
+    assert($down->status == 503 && $down->serverError(), '503 is the server');
+}
+
+#[group: "wire"]
+test fail_on_error_turns_a_404_into_an_error {
+    array<string> $replies = array<string>();
+    $replies[] = reply(404, '', 'missing');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Request $req = .get('/gone');
+    $req->set(.failOnError, 1);
+
+    result<curl::Response, curl::Error> $outcome = $c->send($req);
+
+    $srv->requests();
+
+    assert($outcome->failed(), 'there is no response');
+    assert($outcome->failure() == curl::Error::httpReturnedError, 'only the error');
+}
+
+#[group: "wire"]
+test response_headers_metadata_and_cookies {
+    array<string> $replies = array<string>();
+    $replies[] = 'HTTP/1.1 200 Fine\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 2\r\n\r\nok';
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.get('/meta')) else ($e) {
+        die("the request failed: {$e}");
+    }
+
+    $srv->requests();
+
+    assert($res->headers->statusLine == 'HTTP/1.1 200 Fine', 'the reason phrase is kept');
+    assert(($res->contentType() ?? '') == 'text/plain; charset=utf-8', 'content type in full');
+    assert($res->headers->all('set-cookie')->count() == 2, 'both cookies');
+    assert($res->version == curl::HttpVersion::http11, 'HTTP/1.1');
+    assert("{$res->version}" == 'HTTP/1.1', 'which reads as itself');
+    assert($res->ip == '127.0.0.1', 'from loopback');
+    assert($res->port == $srv->port as int64, 'on the port the server took');
+    assert($res->url == $srv->url('/meta'), 'and the effective url is the one asked for');
+    assert($res->rawHeaders->starts('HTTP/1.1 200 Fine'), 'the raw block is there too');
+}
+
+#[group: "wire"]
+test an_interim_100_continue_is_not_the_response {
+    // over a megabyte, so libcurl asks for a 100 before it sends the body
+    string $big = str::repeat('x', 1100000);
+
+    Server $srv = serve(ok('done'));
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.post('/big', $big)) else ($e) {
+        die("the large post failed: {$e}");
+    }
+
+    string $raw = $srv->requests()[0];
+
+    assert((requestHeaders($raw)->get('Expect') ?? '') == '100-continue', 'libcurl did wait for a 100');
+    assert(requestBody($raw)->size() == $big->size(), 'every byte of the body arrived');
+    assert($res->status == 200, 'the final status, not the 100');
+    assert($res->headers->statusLine->starts('HTTP/1.1 200'), 'and the final block');
+}
+
+// ---- redirects ---------------------------------------------------------------------------------
+
+#[group: "wire"]
+test a_redirect_is_followed_and_only_the_last_hop_is_kept {
+    array<string> $replies = array<string>();
+    $replies[] = reply(302, 'Location: /next\r\nX-Hop: first\r\n', '');
+    $replies[] = reply(200, 'X-Hop: last\r\n', 'arrived');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.get('/start')) else ($e) {
+        die("the redirect failed: {$e}");
+    }
+
+    array<string> $seen = $srv->requests();
+
+    assert($seen->count() == 2, 'two requests');
+    assert(requestLine($seen[1]) == 'GET /next HTTP/1.1', 'the second went where Location said');
+    assert($res->body == 'arrived', 'the body is the destination');
+    assert($res->redirects == 1, 'one hop');
+    assert($res->url == $srv->url('/next'), 'the effective url moved');
+    assert(($res->header('X-Hop') ?? '') == 'last', 'the headers are the last hop');
+    assert($res->headers->all('X-Hop')->count() == 1, 'and only the last hop');
+}
+
+#[group: "wire"]
+test follow_off_hands_back_the_redirect {
+    array<string> $replies = array<string>();
+    $replies[] = reply(301, 'Location: /elsewhere\r\n', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->follow(false);
+
+    curl::Response $res = guard $c->send(.get('/start')) else ($e) {
+        die("the request failed: {$e}");
+    }
+
+    $srv->requests();
+
+    assert($res->status == 301 && $res->redirect(), 'the 301 itself');
+    assert(($res->header('Location') ?? '') == '/elsewhere', 'with where it pointed');
+    assert($res->redirects == 0, 'and nothing followed');
+}
+
+#[group: "wire"]
+test too_many_redirects_is_an_error {
+    array<string> $replies = array<string>();
+    $replies[] = reply(302, 'Location: /a\r\n', '');
+    $replies[] = reply(302, 'Location: /b\r\n', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Request $req = .get('/start');
+    $req->maxRedirects(1);
+
+    result<curl::Response, curl::Error> $outcome = $c->send($req);
+
+    $srv->requests();
+
+    assert($outcome->failed(), 'the second hop is past the cap');
+    assert($outcome->failure() == curl::Error::tooManyRedirects, 'and says so');
+}
+
+#[group: "wire"]
+test a_post_answered_with_303_becomes_a_get {
+    array<string> $replies = array<string>();
+    $replies[] = reply(303, 'Location: /result\r\n', '');
+    $replies[] = reply(200, '', 'done');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $res = guard $c->send(.post('/create', 'payload')) else ($e) {
+        die("the post failed: {$e}");
+    }
+
+    array<string> $seen = $srv->requests();
+
+    assert(requestLine($seen[0]) == 'POST /create HTTP/1.1', 'the POST went out');
+    assert(requestLine($seen[1]) == 'GET /result HTTP/1.1', 'and the 303 was followed as a GET');
+    assert(requestBody($seen[1])->empty(), 'without the body');
+}
+
+// ---- one client, many requests ----------------------------------------------------------------
+
+/**
+ * The keep-alive bug, on the wire. A reused handle must not send the second request with
+ * the first one's method, body, or headers.
+ */
+#[group: "wire"]
+test a_client_request_leaks_nothing_into_the_next {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, '', '');
+    $replies[] = reply(200, '', '');
+    $replies[] = reply(200, '', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->header('X-Client', 'always');
+
+    curl::Request $first = .post('/one', 'first body');
+    $first->header('X-Only-First', '1');
+    $first->userAgent('first-agent');
+
+    curl::Response $a = guard $c->send($first) else ($e) { die("{$e}"); }
+    curl::Response $b = guard $c->send(.get('/two')) else ($e) { die("{$e}"); }
+    curl::Response $h = guard $c->send(.head('/three')) else ($e) { die("{$e}"); }
+
+    array<string> $seen = $srv->requests();
+    curl::Headers $second = requestHeaders($seen[1]);
+
+    assert(requestLine($seen[1]) == 'GET /two HTTP/1.1', 'the second is a GET');
+    assert(requestBody($seen[1])->empty(), 'with no body');
+    assert(!$second->has('X-Only-First'), 'and none of the first request headers');
+    assert(($second->get('User-Agent') ?? '') != 'first-agent', 'nor its options');
+    assert(($second->get('X-Client') ?? '') == 'always', 'but the client headers every time');
+    assert(requestLine($seen[2]) == 'HEAD /three HTTP/1.1', 'a HEAD after a GET');
+}
+
+#[group: "wire"]
+test client_defaults_apply_and_a_request_overrides_them {
+    array<string> $replies = array<string>();
+    $replies[] = reply(200, '', '');
+    $replies[] = reply(200, '', '');
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+    $c->userAgent('client-agent');
+
+    curl::Request $own = .get('/b');
+    $own->userAgent('request-agent');
+
+    curl::Response $a = guard $c->send(.get('/a')) else ($e) { die("{$e}"); }
+    curl::Response $b = guard $c->send($own) else ($e) { die("{$e}"); }
+
+    array<string> $seen = $srv->requests();
+
+    assert((requestHeaders($seen[0])->get('User-Agent') ?? '') == 'client-agent', 'the client default');
+    assert((requestHeaders($seen[1])->get('User-Agent') ?? '') == 'request-agent', 'the request wins');
+}
+
+// ---- streamed bodies --------------------------------------------------------------------------
+
+#[group: "wire"]
+test an_unsized_stream_goes_out_chunked {
+    Server $srv = serve(ok(''));
+    Tally $calls = Tally();
+
+    curl::Request $req = curl::Request(.put, '/stream');
+    $req->uploadStream(function() : string {
+        if ($calls->calls == 3) {
+            return '';
+        }
+
+        $calls->calls = $calls->calls + 1;
+
+        return 'part';
+    });
+
+    string $raw = sent($srv, $req);
+    curl::Headers $h = requestHeaders($raw);
+
+    assert(requestLine($raw) == 'PUT /stream HTTP/1.1', 'an upload is a PUT');
+    assert(($h->get('Transfer-Encoding') ?? '') == 'chunked', 'with no size, chunked');
+    assert(!$h->has('Content-Length'), 'and no length');
+    assert(requestBody($raw)->contains('part'), 'the chunks went out');
+    assert(requestBody($raw)->ends('0\r\n\r\n'), 'and the stream was ended');
+}
+
+#[group: "wire"]
+test a_sized_stream_has_a_length {
+    Server $srv = serve(ok(''));
+    Tally $calls = Tally();
+
+    curl::Request $req = curl::Request(.put, '/sized');
+    $req->uploadStream(function() : string {
+        if ($calls->calls == 2) {
+            return '';
+        }
+
+        $calls->calls = $calls->calls + 1;
+
+        return 'abcde';
+    }, 10);
+
+    string $raw = sent($srv, $req);
+
+    assert((requestHeaders($raw)->get('Content-Length') ?? '') == '10', 'the size went out as the length');
+    assert(requestBody($raw) == 'abcdeabcde', 'and the body is the chunks, joined');
+}
+
+#[group: "wire"]
+test a_file_upload_keeps_its_method {
+    string $path = fixture('libcurl_wire_upload.txt', 'from disk');
+
+    Server $srv = serve(ok(''));
+    curl::Request $req = curl::Request(.post, '/upload');
+    $req->uploadFile($path);
+
+    string $raw = sent($srv, $req);
+
+    cleanup($path);
+
+    assert(requestLine($raw) == 'POST /upload HTTP/1.1', 'a POST stays a POST, like curl -T -X POST');
+    assert((requestHeaders($raw)->get('Content-Length') ?? '') == '9', 'the file size is the length');
+    assert(requestBody($raw) == 'from disk', 'and the file is the body');
+}
+
+#[group: "wire"]
+test upload_progress_is_reported {
+    Server $srv = serve(ok(''));
+    Tally $seen = Tally();
+
+    curl::Request $req = .put('/p', str::repeat('y', 200000));
+    $req->onProgress(function(const curl::Progress& $p) : bool {
+        if ($p->uploaded > 0) {
+            $seen->calls = $seen->calls + 1;
+        }
+
+        return true;
+    });
+
+    string $raw = sent($srv, $req);
+
+    assert(requestBody($raw)->size() == 200000, 'the body went out');
+    assert($seen->calls > 0, 'and progress saw bytes going up');
+}
+
+// ---- forms -------------------------------------------------------------------------------------
+
+#[group: "wire"]
+test a_multipart_form_goes_out_in_parts {
+    string $path = fixture('libcurl_wire_form.txt', 'file contents');
+
+    curl::Form $form = curl::Form();
+    $form->field('title', 'hello');
+    $form->file('doc', $path, 'text/plain');
+    $form->upload('blob', 'blob.bin', "x\u{0}y");
+
+    Server $srv = serve(ok(''));
+    string $raw = sent($srv, .postForm('/form', $form));
+
+    cleanup($path);
+
+    string $type = requestHeaders($raw)->get('Content-Type') ?? '';
+    string $body = requestBody($raw);
+
+    assert(requestLine($raw) == 'POST /form HTTP/1.1', 'a POST');
+    assert($type->starts('multipart/form-data; boundary='), 'with the boundary libcurl wrote');
+    assert($body->contains('name="title"'), 'the field');
+    assert($body->contains('hello'), 'and its value');
+    assert($body->contains('name="doc"; filename="libcurl_wire_form.txt"'), 'the file, under its own name');
+    assert($body->contains('file contents'), 'and its contents');
+    assert($body->contains('filename="blob.bin"'), 'the in-memory upload, under the name it was given');
+    assert($body->contains("x\u{0}y"), 'with its zero byte intact');
+}
+
+// ---- caps and failures -------------------------------------------------------------------------
+
+#[group: "wire"]
+test the_cap_holds_without_a_content_length {
+    // chunked, so there's no Content-Length for libcurl's own check to read
+    string $chunked = 'HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n0123456789abcdef\r\n10\r\n0123456789abcdef\r\n0\r\n\r\n';
+
+    array<string> $replies = array<string>();
+    $replies[] = $chunked;
+    $replies[] = $chunked;
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    curl::Response $whole = guard $c->send(.get('/c')) else ($e) {
+        die("the chunked body failed: {$e}");
+    }
+
+    assert($whole->body->size() == 32, 'two chunks, joined');
+
+    curl::Request $capped = .get('/c');
+    $capped->maxBytes(20);
+
+    result<curl::Response, curl::Error> $over = $c->send($capped);
+
+    assert($over->failed(), 'the second chunk crosses the cap');
+    assert($over->failure() == curl::Error::filesizeExceeded, 'and the cap says so');
+}
+
+#[group: "wire"]
+test an_empty_reply_is_an_error_not_a_response {
+    array<string> $replies = array<string>();
+    $replies[] = '';
+
+    Server $srv = serve($replies);
+    curl::Client $c = $srv->client();
+
+    result<curl::Response, curl::Error> $outcome = $c->send(.get('/nothing'));
+
+    $srv->requests();
+
+    assert($outcome->failed(), 'a closed connection is not a response');
+    assert(!$outcome->failure()->message()->empty(), 'and libcurl says why');
+}
+
+#[group: "wire"]
+test a_closed_port_is_could_not_connect {
+    // a server that served nothing and closed. its port is free again, and nobody listens
+    Server $srv = serve(array<string>());
+    $srv->requests();
+
+    curl::Request $req = .get($srv->url('/'));
+    $req->proxy('');
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'nothing is listening');
+    assert($outcome->failure() == curl::Error::couldNotConnect, 'and that is a connect failure');
+}
+
+#[end]

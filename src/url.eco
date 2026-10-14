@@ -75,14 +75,20 @@ internal function authorityEnd(const string& $url) : usize
  *
  * An absolute URL wins. A protocol-relative one (`//cdn.example.com/x`) takes the base's
  * scheme and nothing else of it. A path that starts with `/` replaces everything after
- * the authority, the way a browser does — `https://api.example.com/v1` + `/health` is
- * `https://api.example.com/health`, not `.../v1/health`. Anything else is glued on with
- * exactly one slash. An empty base is a no-op.
+ * the authority, the way a browser does: `https://api.example.com/v1` + `/health` is
+ * `https://api.example.com/health`, not `.../v1/health`. A `?query` or `#fragment` replaces
+ * the base's own. Anything else is glued onto the base's path with exactly one slash, so a
+ * query on the base (`.../v1?key=1`) never ends up in front of it. An empty base is a
+ * no-op, and so is an empty url: it means the base itself, with no slash added.
  */
 internal function joinUrl(const string& $base, const string& $url) : string
 {
     if ($base->empty()) {
         return $url;
+    }
+
+    if ($url->empty()) {
+        return $base;
     }
 
     if (isAbsoluteUrl($url)) {
@@ -108,11 +114,36 @@ internal function joinUrl(const string& $base, const string& $url) : string
         return $base->sub(0, $end)->concat($url);
     }
 
-    if ($base->ends('/')) {
-        return $base->concat($url);
+    if ($url->starts('#')) {
+        return $base->sub(0, $base->find('#'))->concat($url);
     }
 
-    return "{$base}/{$url}";
+    string $path = $base->sub(0, pathEnd($base));
+
+    if ($url->starts('?')) {
+        return $path->concat($url);
+    }
+
+    if ($path->ends('/')) {
+        return $path->concat($url);
+    }
+
+    return "{$path}/{$url}";
+}
+
+/**
+ * Index where the path ends: the first `?` or `#`, or the end of the string.
+ */
+internal function pathEnd(const string& $url) : usize
+{
+    usize $query = $url->find('?');
+    usize $fragment = $url->find('#');
+
+    if ($fragment < $query) {
+        return $fragment;
+    }
+
+    return $query;
 }
 
 /**
@@ -139,15 +170,62 @@ internal function appendQuery(const string& $url, const string& $encoded) : stri
 
     string $out = $head;
 
-    if ($head->contains('?')) {
-        $out->append('&');
-    }
-    else {
+    // a url that already ends in its separator (`/search?`) gets no second one
+    if (!$head->contains('?')) {
         $out->append('?');
+    }
+    else if (!$head->ends('?') && !$head->ends('&')) {
+        $out->append('&');
     }
 
     $out->append($encoded);
     $out->append($frag);
 
     return $out;
+}
+
+#[group: "unit"]
+test an_empty_url_is_the_base_itself {
+    assert(joinUrl('https://api.example.com/v1/users', '') == 'https://api.example.com/v1/users', 'no slash is added');
+    assert(joinUrl('https://api.example.com/', '') == 'https://api.example.com/', 'a trailing one is kept');
+    assert(joinUrl('', '') == '', 'nothing joined to nothing');
+}
+
+#[group: "unit"]
+test a_relative_path_lands_before_the_base_query {
+    assert(joinUrl('https://api.example.com/v1?key=abc', 'users') == 'https://api.example.com/v1/users', 'the path, not the query, is extended');
+    assert(joinUrl('https://api.example.com/v1/#top', 'users') == 'https://api.example.com/v1/users', 'nor the fragment');
+    assert(joinUrl('https://api.example.com/v1', 'users?page=2') == 'https://api.example.com/v1/users?page=2', 'the url keeps its own query');
+}
+
+#[group: "unit"]
+test a_query_or_fragment_replaces_the_base_one {
+    assert(joinUrl('https://api.example.com/v1?key=abc', '?page=2') == 'https://api.example.com/v1?page=2', 'a query replaces the query');
+    assert(joinUrl('https://api.example.com/v1', '?page=2') == 'https://api.example.com/v1?page=2', 'or adds one, with no slash');
+    assert(joinUrl('https://api.example.com/v1?k=1#a', '#b') == 'https://api.example.com/v1?k=1#b', 'a fragment replaces only the fragment');
+}
+
+#[group: "unit"]
+test a_schemeless_base_still_joins {
+    assert(joinUrl('localhost:8080', '/health') == 'localhost:8080/health', 'no scheme, so the whole base is the origin');
+    assert(joinUrl('localhost:8080/v1', 'health') == 'localhost:8080/v1/health', 'and a relative path is glued on');
+    assert(joinUrl('localhost:8080', '//cdn/x') == '//cdn/x', 'a protocol-relative url has no scheme to borrow');
+}
+
+#[group: "unit"]
+test path_and_authority_ends {
+    assert(pathEnd('https://a.example/x?q#f') == 19, 'the query comes first');
+    assert(pathEnd('https://a.example/x#f?q') == 19, 'or the fragment does');
+    assert(pathEnd('https://a.example/x') == 19, 'or neither, and it is the end');
+    assert(authorityEnd('https://a.example') == 17, 'a bare origin ends at the end');
+    assert(authorityEnd('https://a.example?q') == 17, 'a query ends the authority too');
+    assert(authorityEnd('nothing') == 7, 'no scheme is no authority');
+}
+
+#[group: "unit"]
+test append_query_does_not_double_a_separator {
+    assert(appendQuery('https://e.com/s?', 'a=1') == 'https://e.com/s?a=1', 'a bare question mark');
+    assert(appendQuery('https://e.com/s?x=1&', 'a=1') == 'https://e.com/s?x=1&a=1', 'a trailing ampersand');
+    assert(appendQuery('https://e.com/s?#f', 'a=1') == 'https://e.com/s?a=1#f', 'and before a fragment');
+    assert(appendQuery('https://e.com/s', '') == 'https://e.com/s', 'an empty query changes nothing');
 }

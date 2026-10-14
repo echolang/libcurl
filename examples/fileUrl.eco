@@ -4,13 +4,13 @@
 //
 //   echoc run -m . examples/fileUrl.eco
 
-string $path = '/tmp/libcurl_example.txt';
+string $path = std::env::join(std::env::tmp(), 'libcurl_example.txt');
 
 usize $written = guard std::io::writefile($path, 'the body came back through an Echo callback') else ($e) {
     die("could not write the fixture: {$e}");
 }
 
-curl::Response $res = guard curl::send(.get("file://{$path}")) else ($e) {
+curl::Response $res = guard curl::send(.get(std::env::file_url($path))) else ($e) {
     die("the transfer failed: {$e}");
 }
 
@@ -21,7 +21,9 @@ echo $res->body;
 echo "status {$res->status}, success {$res->success()}";
 
 // the failing side, with a real message from libcurl
-result<curl::Response, curl::Error> $missing = curl::send(.get('file:///tmp/libcurl_no_such_file'));
+string $missingPath = std::env::join(std::env::tmp(), 'libcurl_no_such_file');
+
+result<curl::Response, curl::Error> $missing = curl::send(.get(std::env::file_url($missingPath)));
 
 if ($missing->failed()) {
     curl::Error $err = $missing->failure();

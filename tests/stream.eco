@@ -1,0 +1,335 @@
+/**
+ * Bodies that don't live in memory, progress, cancelling, and the byte cap.
+ *
+ * All of it over `file://`, the same as `transfer.eco`. curl reads a `file://` URL as a
+ * download and writes one as an upload, so both directions run with no network and no server.
+ */
+
+/**
+ * What a closure saw. A class, because a closure copies the locals it captures, and a
+ * handle is the one thing whose copy still points at the same place.
+ */
+class Tally
+{
+    public string $text;
+    public int32 $calls;
+
+    constructor()
+    {
+        $this->text = '';
+        $this->calls = 0;
+    }
+}
+
+function largeText() : string
+{
+    return str::repeat('the quick brown fox jumps over the lazy dog\n', 4000);
+}
+
+function fixture(const string& $name, const string& $text) : string
+{
+    string $path = fixturePath($name);
+
+    usize $written = guard std::io::writefile($path, $text) else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    return $path;
+}
+
+function cleanup(const string& $path) : void
+{
+    result<bool, std::io::ioerror> $gone = std::io::remove($path);
+}
+
+function present(const string& $path) : bool
+{
+    bool $there = guard std::io::exists($path) else ($e) {
+        return false;
+    }
+
+    return $there;
+}
+
+#[group: "unit"]
+test save_to_writes_the_body_to_a_file {
+    string $text = largeText();
+    string $source = fixture('libcurl_stream_source.txt', $text);
+    string $target = fixturePath('libcurl_stream_saved.txt');
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->saveTo($target);
+
+    curl::Response $res = guard curl::send($req) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    string $saved = guard std::io::readfile($target) else ($e) {
+        die("the download is not there: {$e}");
+    }
+
+    assert($res->body->empty(), 'nothing was held in memory');
+    assert($res->bytes == $text->size() as int64, 'every byte was counted');
+    assert($saved == $text, 'and every byte landed in the file, in order');
+
+    cleanup($source);
+    cleanup($target);
+}
+
+#[group: "unit"]
+test a_memory_body_counts_its_bytes {
+    string $source = fixture('libcurl_stream_count.txt', 'twelve bytes');
+
+    curl::Response $res = guard curl::send(.get(std::env::file_url($source))) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    assert($res->bytes == 12, 'bytes matches the body');
+    assert("{$res}" == '0 (12 bytes)', 'and the short form reads it');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test chunks_arrive_in_order {
+    string $text = largeText();
+    string $source = fixture('libcurl_stream_chunks.txt', $text);
+    Tally $seen = Tally();
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->onChunk(function(const string& $chunk) : bool {
+        $seen->text->append($chunk);
+        $seen->calls = $seen->calls + 1;
+
+        return true;
+    });
+
+    curl::Response $res = guard curl::send($req) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    assert($res->body->empty(), 'the closure took the body, nothing was kept');
+    assert($seen->calls > 1, 'a body this size arrives in more than one chunk');
+    assert($seen->text == $text, 'and the chunks reassemble in order');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test a_chunk_closure_can_stop_the_transfer {
+    string $source = fixture('libcurl_stream_stop.txt', largeText());
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->onChunk(function(const string& $chunk) : bool {
+        return false;
+    });
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'the transfer stopped');
+    assert($outcome->failure() == curl::Error::abortedByCallback, 'and says the closure stopped it');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test max_bytes_stops_a_large_body {
+    string $source = fixture('libcurl_stream_cap.txt', largeText());
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->maxBytes(10);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'the body is over the cap');
+    assert($outcome->failure() == curl::Error::filesizeExceeded, 'and the error says so');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test max_bytes_zero_is_no_cap_and_the_request_wins {
+    string $text = largeText();
+    string $source = fixture('libcurl_stream_nocap.txt', $text);
+
+    curl::Client $client = curl::Client();
+    $client->maxBytes(10);
+
+    result<curl::Response, curl::Error> $capped = $client->send(.get(std::env::file_url($source)));
+
+    assert($capped->failed(), 'the client cap applies to a request that says nothing');
+    assert($capped->failure() == curl::Error::filesizeExceeded, 'as a size error');
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->maxBytes(0);
+
+    curl::Response $res = guard $client->send($req) else ($e) {
+        die("the request lifted the cap and still failed: {$e}");
+    }
+
+    assert($res->body == $text, 'a request can lift the client cap');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test a_failed_save_leaves_no_file_behind {
+    string $source = fixture('libcurl_stream_partial.txt', largeText());
+    string $target = fixturePath('libcurl_stream_partial_saved.txt');
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->saveTo($target);
+    $req->maxBytes(10);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'the cap stopped the download');
+    assert(!present($target), 'and the partial file was removed');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test an_unwritable_save_path_is_a_write_error {
+    string $source = fixture('libcurl_stream_nowhere.txt', 'body');
+    string $target = std::env::join(fixturePath('libcurl_no_such_directory'), 'saved.txt');
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->saveTo($target);
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'there is nowhere to write');
+    assert($outcome->failure() == curl::Error::writeError, 'and that is a write error');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test progress_is_reported {
+    string $source = fixture('libcurl_stream_progress.txt', largeText());
+    Tally $seen = Tally();
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->onProgress(function(const curl::Progress& $p) : bool {
+        $seen->calls = $seen->calls + 1;
+
+        return true;
+    });
+
+    curl::Response $res = guard curl::send($req) else ($e) {
+        die("the transfer failed: {$e}");
+    }
+
+    assert($seen->calls > 0, 'the closure heard about the transfer');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test progress_can_cancel {
+    string $source = fixture('libcurl_stream_cancel.txt', largeText());
+
+    curl::Request $req = .get(std::env::file_url($source));
+    $req->onProgress(function(const curl::Progress& $p) : bool {
+        return false;
+    });
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'the transfer was cancelled');
+    assert($outcome->failure() == curl::Error::abortedByCallback, 'by the callback');
+
+    cleanup($source);
+}
+
+#[group: "unit"]
+test upload_file_copies_byte_for_byte {
+    string $text = largeText();
+    string $source = fixture('libcurl_stream_upload_src.txt', $text);
+    string $target = fixturePath('libcurl_stream_upload_dst.txt');
+
+    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    $req->uploadFile($source);
+
+    curl::Response $res = guard curl::send($req) else ($e) {
+        die("the upload failed: {$e}");
+    }
+
+    string $landed = guard std::io::readfile($target) else ($e) {
+        die("the upload is not there: {$e}");
+    }
+
+    assert($landed == $text, 'the file arrived whole');
+
+    cleanup($source);
+    cleanup($target);
+}
+
+#[group: "unit"]
+test upload_stream_with_unknown_size {
+    string $target = fixturePath('libcurl_stream_upload_gen.txt');
+    Tally $sent = Tally();
+
+    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    $req->uploadStream(function() : string {
+        if ($sent->calls == 3) {
+            return '';
+        }
+
+        $sent->calls = $sent->calls + 1;
+
+        return 'abc';
+    });
+
+    curl::Response $res = guard curl::send($req) else ($e) {
+        die("the upload failed: {$e}");
+    }
+
+    string $landed = guard std::io::readfile($target) else ($e) {
+        die("the upload is not there: {$e}");
+    }
+
+    assert($landed == 'abcabcabc', 'every chunk the closure answered, until the empty one');
+
+    cleanup($target);
+}
+
+#[group: "unit"]
+test a_missing_upload_source_is_refused {
+    string $target = fixturePath('libcurl_stream_upload_none.txt');
+
+    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    $req->uploadFile(fixturePath('libcurl_no_such_upload'));
+
+    result<curl::Response, curl::Error> $outcome = curl::send($req);
+
+    assert($outcome->failed(), 'there is nothing to send');
+    assert($outcome->failure() == curl::Error::fileCouldNotReadFile, 'and the error says which side');
+    assert(!present($target), 'and nothing was written');
+}
+
+#[group: "unit"]
+test a_client_forgets_the_last_sink {
+    string $source = fixture('libcurl_stream_reuse.txt', 'again');
+    string $target = fixturePath('libcurl_stream_reuse_saved.txt');
+
+    curl::Client $client = curl::Client();
+
+    curl::Request $first = .get(std::env::file_url($source));
+    $first->saveTo($target);
+
+    curl::Response $saved = guard $client->send($first) else ($e) {
+        die("the first transfer failed: {$e}");
+    }
+
+    curl::Response $second = guard $client->send(.get(std::env::file_url($source))) else ($e) {
+        die("the second transfer failed: {$e}");
+    }
+
+    assert($saved->body->empty(), 'the first went to the file');
+    assert($second->body == 'again', 'the second came back in memory, on the same handle');
+
+    cleanup($source);
+    cleanup($target);
+}

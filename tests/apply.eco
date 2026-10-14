@@ -1,0 +1,61 @@
+/**
+ * What `apply` refuses before a request ever reaches the wire, and what it lets through.
+ *
+ * A fresh `Easy` and no `perform`, so nothing here needs a network or a server.
+ */
+
+function refusedAs(const curl::Request& $req, curl::Error $want) : bool
+{
+    curl::Easy $handle = curl::Easy();
+    status<curl::Error> $applied = curl::apply($handle, $req, array<curl::Opt>());
+
+    if (!$applied->failed()) {
+        return false;
+    }
+
+    return $applied->failure() == $want;
+}
+
+function accepted(const curl::Request& $req) : bool
+{
+    curl::Easy $handle = curl::Easy();
+    status<curl::Error> $applied = curl::apply($handle, $req, array<curl::Opt>());
+
+    return !$applied->failed();
+}
+
+#[group: "unit"]
+test a_header_with_crlf_is_refused {
+    curl::Request $req = .get('https://example.com/');
+    $req->header('X-Evil', "x\r\nInjected: 1");
+
+    assert(refusedAs($req, curl::Error::badFunctionArgument), 'the injected line never goes out');
+}
+
+#[group: "unit"]
+test a_header_pushed_into_items_is_checked_too {
+    curl::Request $req = .get('https://example.com/');
+    $req->headers->items[] = curl::Header('X-Evil', "x\r\nInjected: 1");
+
+    assert(refusedAs($req, curl::Error::badFunctionArgument), 'add is not the only way in');
+}
+
+#[group: "unit"]
+test head_with_a_body_is_refused {
+    curl::Request $req = .head('https://example.com/');
+    $req->body = 'dropped';
+
+    assert(refusedAs($req, curl::Error::badFunctionArgument), 'noBody would drop it without a word');
+}
+
+#[group: "unit"]
+test bodies_that_go_out {
+    curl::Request $get = .get('https://example.com/search');
+    $get->body = '{"query":{}}';
+
+    assert(accepted($get), 'a GET with a body goes out as a custom GET');
+    assert(accepted(curl::Request(.post, 'https://example.com/')), 'an empty POST');
+    assert(accepted(.put('https://example.com/', '')), 'an empty PUT');
+    assert(accepted(.patch('https://example.com/', '')), 'an empty PATCH');
+    assert(accepted(.del('https://example.com/')), 'a DELETE without one');
+}

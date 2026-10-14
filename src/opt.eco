@@ -8,69 +8,204 @@
  *
  * **One enum per C type is what makes the value safe.** A variadic tail element keeps its
  * own type, and there's no destination to type a literal against, so `cSetopt($h, 52, [1])`
- * would place a four-byte `int32` where C reads a `long` — eight bytes on darwin/linux,
+ * would place a four-byte `int32` where C reads a `long`: eight bytes on darwin/linux,
  * four on Windows. That's the oldest bug in every curl binding. Going through
  * `Easy::setLong` matches the width before the list is built, so the mistake is
  * unreachable rather than merely discouraged.
  *
- * The number on each case is curl's, frozen ABI, with the C name beside it so a line can
- * be checked against `curl.h` at a glance. An option we haven't named yet is reachable
+ * The number on each case is curl's, frozen ABI, with the C name in its docblock so a line
+ * can be checked against `curl.h` at a glance. An option we haven't named yet is reachable
  * through `Easy::setRaw`, which is why this enum being closed costs nothing.
  */
 
 namespace curl;
 
 /**
- * Options whose value is a C `long`. Written through `Easy::set(LongOption, int64)`.
+ * Options whose value is a C `long`. `set(.verbose, 1)` on a `Request` or a `Client`, or
+ * `Easy::setLong`.
+ *
+ * The named helpers (`timeout`, `follow`, ...) write most of these for you. Reach for the
+ * enum when there's no helper.
  */
 public enum LongOption : int32
 {
-    case verbose           = 41;    // CURLOPT_VERBOSE
-    case noBody            = 44;    // CURLOPT_NOBODY
-    case failOnError       = 45;    // CURLOPT_FAILONERROR
-    case upload            = 46;    // CURLOPT_UPLOAD
-    case post              = 47;    // CURLOPT_POST
-    case followRedirects   = 52;    // CURLOPT_FOLLOWLOCATION
-    case verifyPeer        = 64;    // CURLOPT_SSL_VERIFYPEER
-    case maxRedirects      = 68;    // CURLOPT_MAXREDIRS
-    case httpGet           = 80;    // CURLOPT_HTTPGET
-    case verifyHost        = 81;    // CURLOPT_SSL_VERIFYHOST
-    case noSignal          = 99;    // CURLOPT_NOSIGNAL
-    case httpAuth          = 107;   // CURLOPT_HTTPAUTH
-    case timeoutMs         = 155;   // CURLOPT_TIMEOUT_MS
-    case connectTimeoutMs  = 156;   // CURLOPT_CONNECTTIMEOUT_MS
-    case tcpKeepAlive      = 213;   // CURLOPT_TCP_KEEPALIVE
+    /**
+     * Prints libcurl's own trace of the transfer to stderr. The first thing to reach for when a
+     * request misbehaves. `CURLOPT_VERBOSE`.
+     */
+    case verbose = 41;
+
+    /**
+     * Asks for headers only. `Method::head` sets it. `CURLOPT_NOBODY`.
+     */
+    case noBody = 44;
+
+    /**
+     * Turns a status of 400 or above into `.httpReturnedError` instead of a `Response`.
+     * `CURLOPT_FAILONERROR`.
+     */
+    case failOnError = 45;
+
+    /**
+     * Marks the transfer as an upload. `uploadFile` and `uploadStream` set it for you.
+     * `CURLOPT_UPLOAD`.
+     */
+    case upload = 46;
+
+    /**
+     * libcurl's own POST. `Method::post` sets it. `CURLOPT_POST`.
+     */
+    case post = 47;
+
+    /**
+     * Follows `Location`. `follow` writes it, as 2 for on. `CURLOPT_FOLLOWLOCATION`.
+     */
+    case followRedirects = 52;
+
+    /**
+     * Checks the certificate chain. `verifyTls` writes it. `CURLOPT_SSL_VERIFYPEER`.
+     */
+    case verifyPeer = 64;
+
+    /**
+     * The redirect cap. `maxRedirects` writes it. `CURLOPT_MAXREDIRS`.
+     */
+    case maxRedirects = 68;
+
+    /**
+     * libcurl's own GET. `Method::get` sets it. `CURLOPT_HTTPGET`.
+     */
+    case httpGet = 80;
+
+    /**
+     * Checks the certificate's hostname, as 2 for on. `verifyTls` writes it.
+     * `CURLOPT_SSL_VERIFYHOST`.
+     */
+    case verifyHost = 81;
+
+    /**
+     * Keeps libcurl away from signals. Every handle starts with it on, because a library has no
+     * business taking `SIGALRM` from its host. `CURLOPT_NOSIGNAL`.
+     */
+    case noSignal = 99;
+
+    /**
+     * Which schemes `auth` credentials may use, as a `CURLAUTH_*` bitmask. Basic unless you say
+     * otherwise. `CURLOPT_HTTPAUTH`.
+     */
+    case httpAuth = 107;
+
+    /**
+     * The whole-transfer budget. `timeout` writes it. `CURLOPT_TIMEOUT_MS`.
+     */
+    case timeoutMs = 155;
+
+    /**
+     * The connect-phase budget. `connectTimeout` writes it. `CURLOPT_CONNECTTIMEOUT_MS`.
+     */
+    case connectTimeoutMs = 156;
+
+    /**
+     * Sends TCP keepalive probes on an idle connection. `CURLOPT_TCP_KEEPALIVE`.
+     */
+    case tcpKeepAlive = 213;
+
 }
 
 /**
- * Options whose value is a C string. Written through `Easy::set(StringOption, const string&)`.
+ * Options whose value is a C string. `set(.cookie, 'a=1')` on a `Request` or a `Client`, or
+ * `Easy::setString`.
  */
 public enum StringOption : int32
 {
-    case url             = 10002;   // CURLOPT_URL
-    case proxy           = 10004;   // CURLOPT_PROXY
-    case referer         = 10016;   // CURLOPT_REFERER
-    case userAgent       = 10018;   // CURLOPT_USERAGENT
-    case cookie          = 10022;   // CURLOPT_COOKIE
-    case customRequest   = 10036;   // CURLOPT_CUSTOMREQUEST
-    case caInfo          = 10065;   // CURLOPT_CAINFO
-    case caPath          = 10097;   // CURLOPT_CAPATH
-    case acceptEncoding  = 10102;   // CURLOPT_ACCEPT_ENCODING
-    case username        = 10173;   // CURLOPT_USERNAME
-    case password        = 10174;   // CURLOPT_PASSWORD
-    case unixSocketPath  = 10231;   // CURLOPT_UNIX_SOCKET_PATH
+    /**
+     * The URL. `send` writes it from `Request::url`, joined onto the client's base.
+     * `CURLOPT_URL`.
+     */
+    case url = 10002;
+
+    /**
+     * The proxy to go through. `proxy` writes it. `CURLOPT_PROXY`.
+     */
+    case proxy = 10004;
+
+    /**
+     * The `Referer` header. `CURLOPT_REFERER`.
+     */
+    case referer = 10016;
+
+    /**
+     * The `User-Agent` header. `userAgent` writes it. `CURLOPT_USERAGENT`.
+     */
+    case userAgent = 10018;
+
+    /**
+     * A `Cookie` header, `name=value; other=1`, sent as is. There's no cookie jar behind it.
+     * `CURLOPT_COOKIE`.
+     */
+    case cookie = 10022;
+
+    /**
+     * The method word, for a verb `Method` doesn't name: `set(.customRequest, 'PROPFIND')`.
+     * `CURLOPT_CUSTOMREQUEST`.
+     */
+    case customRequest = 10036;
+
+    /**
+     * A PEM bundle of CA certificates. `caFile` writes it. `CURLOPT_CAINFO`.
+     */
+    case caInfo = 10065;
+
+    /**
+     * A directory of CA certificates, hashed the way OpenSSL wants them. `CURLOPT_CAPATH`.
+     */
+    case caPath = 10097;
+
+    /**
+     * The encodings to ask for and decode. `''` means every one libcurl can decode.
+     * `acceptEncoding` writes it. `CURLOPT_ACCEPT_ENCODING`.
+     */
+    case acceptEncoding = 10102;
+
+    /**
+     * The user half of `auth`. `CURLOPT_USERNAME`.
+     */
+    case username = 10173;
+
+    /**
+     * The password half of `auth`. `CURLOPT_PASSWORD`.
+     */
+    case password = 10174;
+
+    /**
+     * Connects over this Unix domain socket instead of TCP. The URL's host still goes in the
+     * `Host` header. `CURLOPT_UNIX_SOCKET_PATH`.
+     */
+    case unixSocketPath = 10231;
+
 }
 
 /**
- * Options whose value is a `curl_off_t`. Written through `Easy::set(OffOption, int64)`.
+ * Options whose value is a `curl_off_t`. Written through `Easy::setOff`, or through
+ * `set(off: ...)` on a `Request` or a `Client`.
  *
  * Separate from `LongOption` even though both arrive as `int64`. They're different C types,
  * and `curl_easy_setopt` accepts the wrong one silently.
  */
 public enum OffOption : int32
 {
-    case maxFileSize    = 30117;    // CURLOPT_MAXFILESIZE_LARGE
-    case postFieldSize  = 30120;    // CURLOPT_POSTFIELDSIZE_LARGE
+    /**
+     * The byte cap `maxBytes` writes. `Easy` enforces it on the decoded bytes, and libcurl
+     * never sees it. `CURLOPT_MAXFILESIZE_LARGE`.
+     */
+    case maxFileSize = 30117;
+
+    /**
+     * The body's size. `send` writes it with every body, so a zero byte can't cut one short.
+     * `CURLOPT_POSTFIELDSIZE_LARGE`.
+     */
+    case postFieldSize = 30120;
+
 }
 
 // curl encodes the C value type in the option number. `setRaw` reads this so an unnamed
@@ -80,12 +215,22 @@ internal const int32 CURLOPTTYPE_BLOB  = 40000;
 
 // the options this library sets itself, by number. plumbing, not surface. naming them in
 // the enums above would invite a caller to fight `Easy` for the handle
-internal const int32 OPT_WRITEDATA      = 10001;    // CURLOPT_WRITEDATA
-internal const int32 OPT_HTTPHEADER     = 10023;    // CURLOPT_HTTPHEADER
-internal const int32 OPT_HEADERDATA     = 10029;    // CURLOPT_HEADERDATA
-internal const int32 OPT_COPYPOSTFIELDS = 10165;    // CURLOPT_COPYPOSTFIELDS
-internal const int32 OPT_WRITEFUNCTION  = 20011;    // CURLOPT_WRITEFUNCTION
-internal const int32 OPT_HEADERFUNCTION = 20079;    // CURLOPT_HEADERFUNCTION
+internal const int32 OPT_NOPROGRESS       = 43;       // CURLOPT_NOPROGRESS
+internal const int32 OPT_WRITEDATA        = 10001;    // CURLOPT_WRITEDATA
+internal const int32 OPT_READDATA         = 10009;    // CURLOPT_READDATA
+internal const int32 OPT_HTTPHEADER       = 10023;    // CURLOPT_HTTPHEADER
+internal const int32 OPT_HEADERDATA       = 10029;    // CURLOPT_HEADERDATA
+internal const int32 OPT_XFERINFODATA     = 10057;    // CURLOPT_XFERINFODATA
+internal const int32 OPT_COPYPOSTFIELDS   = 10165;    // CURLOPT_COPYPOSTFIELDS
+internal const int32 OPT_MIMEPOST         = 10269;    // CURLOPT_MIMEPOST
+internal const int32 OPT_WRITEFUNCTION    = 20011;    // CURLOPT_WRITEFUNCTION
+internal const int32 OPT_READFUNCTION     = 20012;    // CURLOPT_READFUNCTION
+internal const int32 OPT_HEADERFUNCTION   = 20079;    // CURLOPT_HEADERFUNCTION
+internal const int32 OPT_XFERINFOFUNCTION = 20219;    // CURLOPT_XFERINFOFUNCTION
+internal const int32 OPT_INFILESIZE       = 30115;    // CURLOPT_INFILESIZE_LARGE
+
+// what a read callback answers to stop the upload. curl turns it into CURLE_ABORTED_BY_CALLBACK
+internal const usize READFUNC_ABORT = 268435456;    // CURL_READFUNC_ABORT, 0x10000000
 
 /**
  * One setopt, as a value. This is the option language.
@@ -95,15 +240,38 @@ internal const int32 OPT_HEADERFUNCTION = 20079;    // CURLOPT_HEADERFUNCTION
  * request's. libcurl is last-write-wins, so a later `Opt` is an override, not a merge.
  *
  * `clear` passes a NULL pointer, which is how you undo a string option the defaults
- * already set — `acceptEncoding(false)` after the library asked for compression.
+ * already set: `acceptEncoding(false)` after the library asked for compression.
  */
 public enum Opt
 {
+    /**
+     * A named `long` option. `Request::set(.verbose, 1)` pushes one.
+     */
     case long(LongOption $option, int64 $value);
+
+    /**
+     * A named string option. `Request::set(.cookie, 'a=1')` pushes one.
+     */
     case text(StringOption $option, string $value);
+
+    /**
+     * A named `curl_off_t` option. `Request::set(off: .postFieldSize, 5)` pushes one.
+     */
     case off(OffOption $option, int64 $value);
+
+    /**
+     * An unnamed integer option, by number. `Request::raw(213, 1)` pushes one.
+     */
     case rawLong(int32 $option, int64 $value);
+
+    /**
+     * An unnamed string option, by number. `Request::raw(10022, 'a=1')` pushes one.
+     */
     case rawStr(int32 $option, string $value);
+
+    /**
+     * A string option set back to NULL, undoing whatever an earlier layer wrote.
+     */
     case clear(StringOption $option);
 }
 
@@ -132,6 +300,21 @@ internal function pushRawStr(array<Opt>& $opts, int32 $option, const string& $va
     $opts[] = Opt::rawStr($option, $value);
 }
 
+// CURLFOLLOW_OBEYCODE, libcurl 8.13+. a custom method (PUT, PATCH, DELETE) then turns into the GET
+// a 303 asks for, instead of riding along to the next URL. an older libcurl reads any nonzero
+// as 1, so the worst case is the old behaviour
+internal const int64 FOLLOW_OBEYCODE = 2;
+
+internal function pushFollow(array<Opt>& $opts, bool $on) : void
+{
+    if ($on) {
+        $opts[] = Opt::long(.followRedirects, FOLLOW_OBEYCODE);
+    }
+    else {
+        $opts[] = Opt::long(.followRedirects, 0);
+    }
+}
+
 internal function pushVerifyTls(array<Opt>& $opts, bool $on) : void
 {
     if ($on) {
@@ -158,4 +341,69 @@ internal function pushAuth(array<Opt>& $opts, const string& $username, const str
 {
     $opts[] = Opt::text(.username, $username);
     $opts[] = Opt::text(.password, $password);
+}
+
+#[group: "unit"]
+test the_three_set_overloads_need_no_qualified_enum {
+    Request $req = .get('/');
+    $req->set(.tcpKeepAlive, 1);
+    $req->set(.cookie, 'a=1');
+    $req->set(off: .postFieldSize, 5);
+
+    Client $client = Client();
+    $client->set(.verbose, 0);
+    $client->set(off: .maxFileSize, 9);
+
+    assert($req->opts->count() == 3 && $client->opts->count() == 2, 'each pushed one option');
+
+    match ($req->opts[0]) {
+        Opt::long($option, $value) => {
+            assert($option == LongOption::tcpKeepAlive && $value == 1, 'a long');
+        },
+        else => {
+            assert(false, 'set(.tcpKeepAlive) is a long option');
+        },
+    }
+
+    match ($req->opts[2]) {
+        Opt::off($option, $value) => {
+            assert($option == OffOption::postFieldSize && $value == 5, 'an off_t');
+        },
+        else => {
+            assert(false, 'set(off: ...) is an off_t option');
+        },
+    }
+}
+
+#[group: "unit"]
+test raw_options_remember_their_number {
+    Request $req = .get('/');
+    $req->raw(213, 1);
+    $req->raw(10022, 'a=1');
+
+    match ($req->opts[0]) {
+        Opt::rawLong($option, $value) => {
+            assert($option == 213 && $value == 1, 'a raw long');
+        },
+        else => {
+            assert(false, 'raw with a number is a raw long');
+        },
+    }
+
+    match ($req->opts[1]) {
+        Opt::rawStr($option, $value) => {
+            assert($option == 10022 && $value == 'a=1', 'a raw string');
+        },
+        else => {
+            assert(false, 'raw with a string is a raw string');
+        },
+    }
+}
+
+#[group: "unit"]
+test option_numbers_carry_their_c_type {
+    assert(LongOption::tcpKeepAlive->value() < 10000, 'a long is under the object range');
+    assert(StringOption::url->value() >= 10000 && StringOption::url->value() < 20000, 'a string is an object');
+    assert(OffOption::maxFileSize->value() >= CURLOPTTYPE_OFF_T && OffOption::postFieldSize->value() < CURLOPTTYPE_BLOB, 'an off_t is in its range');
+    assert(OPT_WRITEFUNCTION >= 20000 && OPT_WRITEFUNCTION < CURLOPTTYPE_OFF_T, 'a function pointer is in its range');
 }

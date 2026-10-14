@@ -13,10 +13,11 @@
  * **Types are ours to get right.** Nothing checks a declaration against the real header.
  * There is no header to check against. The mapping this file uses:
  *
- *     CURL* / void*        ptr<uint8>          size_t          usize
- *     const char*          ptr<const uint8>    curl_off_t      int64
- *     char*                ptr<uint8>          int / CURLcode  int32
- *     double               float64
+ *     CURL*                ptr<CURL>           size_t          usize
+ *     curl_slist*          ptr<curl_slist>     curl_off_t      int64
+ *     curl_mime*           ptr<curl_mime>      curl_mimepart*  ptr<curl_mimepart>
+ *     const char*          ptr<const uint8>    int / CURLcode  int32
+ *     void* / char*        ptr<uint8>          double          float64
  *
  * `long` is the one that's a *platform* claim rather than a C claim. darwin and linux
  * are LP64, so it is `int64`. Windows is LLP64, so it is `int32`. The public API stays
@@ -41,21 +42,38 @@ internal const int64 GLOBAL_DEFAULT = 3;
 #[end]
 
 internal extern {
-    function curl_easy_init      as cEasyInit() : ptr<uint8>;
-    function curl_easy_cleanup   as cEasyCleanup(ptr<uint8> $handle) : void;
-    function curl_easy_reset     as cEasyReset(ptr<uint8> $handle) : void;
-    function curl_easy_perform   as cPerform(ptr<uint8> $handle) : int32;
+    struct CURL;
+    struct curl_slist;
+
+    function curl_easy_init      as cEasyInit() : ptr<CURL>;
+    function curl_easy_cleanup   as cEasyCleanup(ptr<CURL> $handle) : void;
+    function curl_easy_reset     as cEasyReset(ptr<CURL> $handle) : void;
+    function curl_easy_perform   as cPerform(ptr<CURL> $handle) : int32;
     function curl_easy_strerror  as cStrerror(int32 $code) : ptr<const uint8>;
 
     // **the two variadic ones.** four parameters, four arguments. the tail is the last
     // parameter's *type*, and the list is written at the call site, so the exact-arity
     // rule never bends. one declaration serves tails of different shapes: what each
     // element is coerced to is C's own answer for an argument with no parameter opposite it
-    function curl_easy_setopt    as cSetopt(ptr<uint8> $handle, int32 $option, variadic_args $args) : int32;
-    function curl_easy_getinfo   as cGetinfo(ptr<uint8> $handle, int32 $info, variadic_args $args) : int32;
+    function curl_easy_setopt    as cSetopt(ptr<CURL> $handle, int32 $option, variadic_args $args) : int32;
+    function curl_easy_getinfo   as cGetinfo(ptr<CURL> $handle, int32 $info, variadic_args $args) : int32;
 
-    function curl_slist_append   as cSlistAppend(ptr<uint8> $list, ptr<const uint8> $line) : ptr<uint8>;
-    function curl_slist_free_all as cSlistFree(ptr<uint8> $list) : void;
+    function curl_slist_append   as cSlistAppend(ptr<curl_slist> $list, ptr<const uint8> $line) : ptr<curl_slist>;
+    function curl_slist_free_all as cSlistFree(ptr<curl_slist> $list) : void;
+
+    // multipart. every setter copies what it's handed, so only the `curl_mime` itself has to
+    // outlive the transfer
+    struct curl_mime;
+    struct curl_mimepart;
+
+    function curl_mime_init      as cMimeInit(ptr<CURL> $handle) : ptr<curl_mime>;
+    function curl_mime_free      as cMimeFree(ptr<curl_mime> $mime) : void;
+    function curl_mime_addpart   as cMimeAddpart(ptr<curl_mime> $mime) : ptr<curl_mimepart>;
+    function curl_mime_name      as cMimeName(ptr<curl_mimepart> $part, ptr<const uint8> $name) : int32;
+    function curl_mime_data      as cMimeData(ptr<curl_mimepart> $part, ptr<const uint8> $data, usize $size) : int32;
+    function curl_mime_filedata  as cMimeFiledata(ptr<curl_mimepart> $part, ptr<const uint8> $path) : int32;
+    function curl_mime_filename  as cMimeFilename(ptr<curl_mimepart> $part, ptr<const uint8> $filename) : int32;
+    function curl_mime_type      as cMimeType(ptr<curl_mimepart> $part, ptr<const uint8> $type) : int32;
 
     function curl_version        as cVersion() : ptr<const uint8>;
 }
@@ -69,7 +87,7 @@ internal extern {
 /**
  * A `long` setopt. The public value is `int64`; the tail matches C's width.
  */
-internal function setoptLong(ptr<uint8> $handle, int32 $option, int64 $value) : int32
+internal function setoptLong(ptr<CURL> $handle, int32 $option, int64 $value) : int32
 {
     #[if: os == windows]
     int32 $narrow = $value as int32;
@@ -83,7 +101,7 @@ internal function setoptLong(ptr<uint8> $handle, int32 $option, int64 $value) : 
 /**
  * A `curl_off_t` setopt. Always 64-bit, on every platform we ship.
  */
-internal function setoptOff(ptr<uint8> $handle, int32 $option, int64 $value) : int32
+internal function setoptOff(ptr<CURL> $handle, int32 $option, int64 $value) : int32
 {
     return cSetopt($handle, $option, [$value]);
 }
@@ -91,7 +109,7 @@ internal function setoptOff(ptr<uint8> $handle, int32 $option, int64 $value) : i
 /**
  * A `long` getinfo. Writes a platform-width slot and answers `int64`.
  */
-internal function getinfoLong(ptr<uint8> $handle, int32 $info) : int64
+internal function getinfoLong(ptr<CURL> $handle, int32 $info) : int64
 {
     #[if: os == windows]
     int32 $value = 0;

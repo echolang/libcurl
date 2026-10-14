@@ -3,7 +3,7 @@
  */
 
 #[module: "libcurl"]
-#[version: "0.1.0"] // x-release-please-version
+#[version: "1.0.0"] // x-release-please-version
 
 // Windows `echoc test` / `run` native-link, so the archive can sit on the link line.
 // `name: "curl"` is the one `archive_in_search` looks up as `libcurl.lib` / `libcurl.a`.

@@ -1,0 +1,90 @@
+/**
+ * Where a body goes, where one comes from, and how far along a transfer is.
+ *
+ * By default a response is a `string` and a request body is a `string`, and that's the right
+ * shape for an API call. It's the wrong shape for a 4 GB download. These three types are the
+ * other shapes, and they're all the same mechanism underneath: libcurl calls an Echo function
+ * per chunk, and that function hands the chunk to whatever the transfer was pointed at.
+ *
+ * **Stopping is a return value.** Echo has no exceptions, so a closure that wants the transfer
+ * to end says `false`. That's the whole cancel story: return `false` from `onProgress` or
+ * `onChunk` and `send` fails with `.abortedByCallback`. Cancelling from another thread is
+ * the same thing with an atomic flag captured in the closure.
+ */
+
+namespace curl;
+
+#[docs::example: "examples/download.eco"]
+/**
+ * Where the response body goes.
+ *
+ * `Request::saveTo` and `Request::onChunk` set it for you. Either way, `Response::bytes`
+ * still counts what arrived.
+ */
+public enum Sink
+{
+    /**
+     * Into `Response::body`. The default, and the one that holds everything in memory.
+     */
+    case memory;
+
+    /**
+     * Into a file, created or truncated. A transfer that fails removes it again, so a path
+     * either holds a complete body or nothing at all.
+     */
+    case file(string $path);
+
+    /**
+     * Handed to a closure one chunk at a time, in arrival order. Nothing is kept. Answering
+     * `false` stops the transfer with `.abortedByCallback`.
+     */
+    case chunks(function<bool(const string&)> $each);
+}
+
+/**
+ * Where the request body comes from.
+ *
+ * `Request::uploadFile` and `Request::uploadStream` set it for you, and clear `body` while
+ * they're at it. Anything but `text` makes the request an upload. libcurl pulls the bytes
+ * as it sends them, so the body never has to exist in memory all at once.
+ */
+public enum Source
+{
+    /**
+     * `Request::body`. The default.
+     */
+    case text;
+
+    /**
+     * The bytes of a file, read as they're sent. The size goes out as `Content-Length`.
+     */
+    case file(string $path);
+
+    /**
+     * Whatever the closure answers, chunk after chunk, until it answers `''`. A `$size` of `-1`
+     * means unknown, and HTTP/1.1 then sends the body chunked.
+     */
+    case chunks(function<string()> $next, int64 $size);
+}
+
+#[docs::example: "examples/download.eco"]
+/**
+ * How far along a transfer is, in bytes. A total is zero until libcurl knows it, and stays
+ * zero when the server never says.
+ *
+ * Handed to the `Request::onProgress` closure, which answers `false` to cancel.
+ */
+public struct Progress
+{
+    /** Body bytes received so far. */
+    public const int64 $downloaded;
+
+    /** The size the server announced, or zero when it hasn't said. */
+    public const int64 $downloadTotal;
+
+    /** Request body bytes sent so far. */
+    public const int64 $uploaded;
+
+    /** The upload's size when it's known up front, or zero. */
+    public const int64 $uploadTotal;
+}

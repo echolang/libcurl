@@ -21,13 +21,54 @@
 namespace curl;
 
 /**
- * `CURLOPT_WRITEFUNCTION` and `CURLOPT_HEADERFUNCTION`. Same function. The only difference
- * is which buffer it gets handed.
+ * Everything one transfer's body callbacks need, in one place curl can point at.
+ *
+ * A C callback has no environment, so the closures, the open files and the counters all
+ * arrive through curl's userdata pointer as a `ptr<Flow>`. It lives inside `Easy`, so the
+ * same argument as the header buffer holds: nothing moves it during a synchronous perform.
+ *
+ * `abort` is the reason *we* stopped the transfer. curl only knows a write callback said no,
+ * which it calls `CURLE_WRITE_ERROR` whatever the cause. `perform` answers this instead.
+ */
+private struct Flow
+{
+    public Sink $sink;
+    public Source $source;
+    public function<bool(const Progress&)>? $progress;
+    public int64 $cap;
+    public int64 $received;
+    public Error? $abort;
+    public string $body;
+    public std::io::file? $out;
+    public std::io::file? $in;
+    public string $scratch;
+    public string $pending;
+    public usize $offset;
+
+    constructor()
+    {
+        $this->sink = .memory;
+        $this->source = .text;
+        $this->progress = null;
+        $this->cap = 0;
+        $this->received = 0;
+        $this->abort = null;
+        $this->body = '';
+        $this->out = null;
+        $this->in = null;
+        $this->scratch = '';
+        $this->pending = '';
+        $this->offset = 0;
+    }
+}
+
+/**
+ * `CURLOPT_HEADERFUNCTION`. Appends every header line to the buffer it's handed.
  *
  * **An ordinary Echo function handed to C.** That's what `extern function<...>` and `&name`
  * buy you. Not a closure, not a method, not generic: those are the three things a C function
  * pointer refuses. A C callback has no environment, so the destination arrives through
- * curl's own userdata pointer. `CURLOPT_WRITEDATA` is exactly that.
+ * curl's own userdata pointer. `CURLOPT_HEADERDATA` is exactly that.
  *
  * Returning anything other than the byte count is how a write callback tells libcurl to
  * stop. That surfaces as `CURLE_WRITE_ERROR`.
@@ -49,6 +90,150 @@ private function writeChunk(ptr<uint8> $chunk, usize $size, usize $count, ptr<ui
 }
 
 /**
+ * `CURLOPT_WRITEFUNCTION`. Counts the chunk against the cap, then hands it to the sink.
+ *
+ * The cap is checked here, on the bytes as they arrive, and not left to libcurl.
+ * `CURLOPT_MAXFILESIZE` is reliable against a `Content-Length`, and a server that doesn't
+ * send one, or a gzip body that inflates, would otherwise grow the buffer without limit.
+ * These are the decoded bytes, which is what actually costs memory.
+ */
+private function writeBody(ptr<uint8> $chunk, usize $size, usize $count, ptr<uint8> $user) : usize
+{
+    usize $bytes = $size * $count;
+    int64 $wide = $bytes as int64;
+    ptr<Flow> $flow = ptr<Flow>($user:$);
+    ptr<const uint8> $data = ptr<const uint8>($chunk:$);
+
+    // what discharges every promotion in here: `$user` is the address of this handle's `Flow`,
+    // which `perform()` handed curl one statement before calling it, and nothing else writes
+    // this option
+    unsafe {
+        $flow->received = $flow->received + $wide;
+
+        if ($flow->cap > 0 && $flow->received > $flow->cap) {
+            $flow->abort = Error::filesizeExceeded;
+
+            return 0;
+        }
+
+        match ($flow->sink) {
+            Sink::memory => {
+                $flow->body->append($data, $bytes);
+            },
+            Sink::file($path) => {
+                std::io::file $out = guard $flow->out else {
+                    $flow->abort = Error::writeError;
+
+                    return 0;
+                }
+
+                usize $written = guard $out->write($data, $bytes) else ($e) {
+                    $flow->abort = Error::writeError;
+
+                    return 0;
+                }
+            },
+            Sink::chunks($each) => {
+                // one scratch string, reused, so a chunk costs a copy and not an allocation
+                $flow->scratch->clear();
+                $flow->scratch->append($data, $bytes);
+
+                if (!$each($flow->scratch)) {
+                    $flow->abort = Error::abortedByCallback;
+
+                    return 0;
+                }
+            },
+        }
+    }
+
+    return $bytes;
+}
+
+/**
+ * `CURLOPT_READFUNCTION`. Fills curl's buffer from the source, and answers 0 at the end.
+ *
+ * A chunk closure can answer more than fits, so what's left of its last answer waits in
+ * `pending` for the next call.
+ */
+private function readBody(ptr<uint8> $buffer, usize $size, usize $count, ptr<uint8> $user) : usize
+{
+    usize $room = $size * $count;
+    ptr<Flow> $flow = ptr<Flow>($user:$);
+
+    // same promise as `writeBody`: `$user` is this handle's `Flow`, set by `perform()`
+    unsafe {
+        match ($flow->source) {
+            Source::file($path) => {
+                std::io::file $in = guard $flow->in else {
+                    $flow->abort = Error::readError;
+
+                    return READFUNC_ABORT;
+                }
+
+                usize $got = guard $in->read($buffer, $room) else ($e) {
+                    $flow->abort = Error::readError;
+
+                    return READFUNC_ABORT;
+                }
+
+                return $got;
+            },
+            Source::chunks($next, $total) => {
+                // an empty answer is the end, so keep asking only while the last one is used up
+                while ($flow->offset >= $flow->pending->size()) {
+                    $flow->pending = $next();
+                    $flow->offset = 0;
+
+                    if ($flow->pending->empty()) {
+                        return 0;
+                    }
+                }
+
+                usize $n = $flow->pending->size() - $flow->offset;
+
+                if ($n > $room) {
+                    $n = $room;
+                }
+
+                string $part = $flow->pending->sub($flow->offset, $n);
+                ptr<const uint8> $from = $part->data();
+
+                mem::copy($buffer, ptr<uint8>($from:$), $n);
+                $flow->offset = $flow->offset + $n;
+
+                return $n;
+            },
+            Source::text => {
+                return 0;
+            },
+        }
+    }
+}
+
+/**
+ * `CURLOPT_XFERINFOFUNCTION`. Reports progress, and answers non-zero to stop. curl turns
+ * that into `CURLE_ABORTED_BY_CALLBACK` on its own.
+ */
+private function xferInfo(ptr<uint8> $user, int64 $downTotal, int64 $downNow, int64 $upTotal, int64 $upNow) : int32
+{
+    ptr<Flow> $flow = ptr<Flow>($user:$);
+
+    // same promise as `writeBody`: `$user` is this handle's `Flow`, set by `perform()`
+    unsafe {
+        function<bool(const Progress&)> $report = guard $flow->progress else {
+            return 0;
+        }
+
+        if (!$report(Progress($downNow, $downTotal, $upNow, $upTotal))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * A NUL-terminated copy of `$text`, or `$text` itself when it already is one.
  *
  * Here's the catch: `cstr()` asserts on a window that stops early. A substring shares its
@@ -65,60 +250,160 @@ private function nulTerminated(const string& $text) : string
     return $text->clone();
 }
 
+/**
+ * Adds one part to a mime. Every setter copies what it's handed, so the strings here can
+ * die as soon as it returns.
+ *
+ * A text part goes in with its size, the same reason as `setBody`: a zero byte in it would
+ * otherwise end it. An empty one still hands over a real pointer, because NULL is how
+ * `curl_mime_data` says "take the data away again".
+ */
+private function mimePart(ptr<curl_mime> $mime, const Part& $part) : status<Error>
+{
+    ptr<curl_mimepart> $held = cMimeAddpart($mime);
+
+    if ($held == null) {
+        return .error(.outOfMemory);
+    }
+
+    string $name = nulTerminated($part->name);
+
+    guard check(cMimeName($held, $name->cstr())) else ($e) {
+        return .error($e);
+    }
+
+    match ($part->body) {
+        PartBody::text($bytes) => {
+            guard mimeData($held, $bytes) else ($e) {
+                return .error($e);
+            }
+        },
+        PartBody::file($path) => {
+            // libcurl stats the file right here, so a missing one fails before the transfer
+            string $owned = nulTerminated($path);
+
+            guard check(cMimeFiledata($held, $owned->cstr())) else ($e) {
+                return .error($e);
+            }
+        },
+    }
+
+    // after the data, because `curl_mime_filedata` sets the filename to the path's last segment
+    string $filename = $part->filename ?? '';
+
+    if (!$filename->empty()) {
+        string $owned = nulTerminated($filename);
+
+        guard check(cMimeFilename($held, $owned->cstr())) else ($e) {
+            return .error($e);
+        }
+    }
+
+    string $type = $part->type ?? '';
+
+    if ($type->empty()) {
+        return .ok;
+    }
+
+    string $ownedType = nulTerminated($type);
+
+    return check(cMimeType($held, $ownedType->cstr()));
+}
+
+// match payload bindings are a `string`, not a `const string&`. the helper copies once
+private function mimeData(ptr<curl_mimepart> $part, string $bytes) : status<Error>
+{
+    if ($bytes->empty()) {
+        string $none = '';
+
+        return check(cMimeData($part, $none->cstr(), 0));
+    }
+
+    return check(cMimeData($part, $bytes->data(), $bytes->size()));
+}
+
+#[docs::groups: ["Options", "Body and headers", "Streaming", "Performing", "Reading back"]]
+#[docs::see: ["curl::Opt", "curl::LongInfo", "curl::StringInfo", "curl::DoubleInfo"]]
+/**
+ * One libcurl easy handle, driven by hand. `Client` and `Request` sit on top of this.
+ *
+ * ```echo
+ * curl::Easy $handle = curl::Easy();
+ *
+ * guard $handle->setString(.url, 'https://echoc.dev') else ($e) { die("{$e}"); }
+ * guard $handle->perform() else ($e) { die("{$e}"); }
+ *
+ * echo $handle->infoLong(.responseCode); // 200
+ * echo $handle->body()->size();
+ * ```
+ *
+ * Most programs never name it. It's here for the transfer the surface above doesn't
+ * spell: every setter answers `status<Error>`, nothing is reset between performs unless
+ * you call `reset()`, and the library defaults (follow, compression) aren't applied.
+ *
+ * `#[unique]`, so it can't be copied. Two holders of one handle would read each other's
+ * responses.
+ */
 #[unique]
 public struct Easy
 {
-    private ptr<uint8> $handle;
-    private ptr<uint8> $slist;      // the request headers, ours to free
-    private string $bodyBuf;
+    private ptr<CURL> $handle;
+    private ptr<curl_slist> $slist;
+    private ptr<curl_mime> $mime;
+    private Flow $flow;
     private string $headBuf;
 
     /**
      * A fresh handle. libcurl's global init runs if this is the first one.
      *
      * Failure leaves `open()` false rather than dying. Running out of handles isn't this
-     * library's call to make. Every method below tolerates a null handle and answers
-     * `CURLE_FAILED_INIT`.
+     * library's call to make. Every method below tolerates a null handle and fails with
+     * `.failedInit`.
      */
     constructor()
     {
         cGlobalInit(GLOBAL_DEFAULT);
 
-        // re-seated through `:$`. a plain `=` on a pointer property writes *through* it
-        $this->handle:$ = cEasyInit();
-        $this->slist:$ = null;
-        $this->bodyBuf = '';
+        $this->handle = cEasyInit();
+        $this->slist = null;
+        $this->mime = null;
+        $this->flow = Flow();
         $this->headBuf = '';
 
         // a library has no business taking SIGALRM out from under its host. overridable like any
         // other long option
-        if ($this->handle:$ != null) {
+        if ($this->handle != null) {
             $this->setLong(.noSignal, 1);
         }
     }
 
     /**
-     * The order matters, which is why this is written out instead of left to the two
-     * pointer properties. libcurl may read a slist option until the handle is cleaned
-     * up, so the handle goes first.
+     * The order matters, which is why this is written out instead of left to the
+     * pointer properties. libcurl may read a slist or a mime option until the handle is
+     * cleaned up, so the handle goes first.
      */
     destructor()
     {
-        if ($this->handle:$ != null) {
+        if ($this->handle != null) {
             cEasyCleanup($this->handle);
         }
 
-        if ($this->slist:$ != null) {
+        if ($this->slist != null) {
             cSlistFree($this->slist);
+        }
+
+        if ($this->mime != null) {
+            cMimeFree($this->mime);
         }
     }
 
+    #[docs::group: "Performing"]
     /**
      * False when libcurl wouldn't give us a handle.
      */
     function open() : bool
     {
-        if ($this->handle:$ == null) {
+        if ($this->handle == null) {
             return false;
         }
 
@@ -127,73 +412,101 @@ public struct Easy
 
     // ---- options ------------------------------------------------------------------------------
 
+    #[docs::group: "Options"]
     /**
      * A `long` option: `setLong(.followRedirects, 1)`.
      */
-    function setLong(LongOption $option, int64 $value) : int32
+    function setLong(LongOption $option, int64 $value) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
-        return setoptLong($this->handle, $option->value(), $value);
+        return check(setoptLong($this->handle, $option->value(), $value));
     }
 
+    #[docs::group: "Options"]
     /**
      * A string option: `setString(.url, 'https://example.com/')`.
      */
-    function setString(StringOption $option, const string& $value) : int32
+    function setString(StringOption $option, const string& $value) : status<Error>
     {
         return $this->setRaw($option->value(), $value);
     }
 
+    #[docs::group: "Options"]
     /**
      * A `curl_off_t` option.
      */
-    function setOff(OffOption $option, int64 $value) : int32
+    function setOff(OffOption $option, int64 $value) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
-        return setoptOff($this->handle, $option->value(), $value);
+        return $this->offOption($option->value(), $value);
     }
 
+    /**
+     * Every `curl_off_t` write lands here, named or by number.
+     *
+     * **`maxFileSize` stops here.** `writeBody` enforces it on the decoded bytes as they
+     * arrive, and libcurl never sees it. libcurl's own check trusts `Content-Length`, and
+     * over HTTP/2 its refusal comes back as `CURLE_RECV_ERROR`, so the reason the caller
+     * asked for would be lost. `0` is no cap, the same as libcurl.
+     */
+    private function offOption(int32 $option, int64 $value) : status<Error>
+    {
+        if ($option != OffOption::maxFileSize->value()) {
+            return check(setoptOff($this->handle, $option, $value));
+        }
+
+        if ($value < 0) {
+            return .error(.badFunctionArgument);
+        }
+
+        $this->flow->cap = $value;
+
+        return .ok;
+    }
+
+    #[docs::group: "Options"]
     /**
      * An option this library hasn't named, by number.
      *
      * The escape hatch. The enums being closed costs nothing, because anything libcurl
      * accepts is reachable without waiting for a release. An option the installed
-     * libcurl doesn't know answers `CURLE_UNKNOWN_OPTION`, which `match`es as
-     * `.unknownOption`.
+     * libcurl doesn't know fails with `.unknownOption`.
      */
-    function setRaw(int32 $option, int64 $value) : int32
+    function setRaw(int32 $option, int64 $value) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
         if ($option >= CURLOPTTYPE_OFF_T && $option < CURLOPTTYPE_BLOB) {
-            return setoptOff($this->handle, $option, $value);
+            return $this->offOption($option, $value);
         }
 
-        return setoptLong($this->handle, $option, $value);
+        return check(setoptLong($this->handle, $option, $value));
     }
 
+    #[docs::group: "Options"]
     /**
      * A string option this library hasn't named, by number.
      */
-    function setRaw(int32 $option, const string& $value) : int32
+    function setRaw(int32 $option, const string& $value) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
         string $owned = nulTerminated($value);
 
-        return cSetopt($this->handle, $option, [$owned->cstr()]);
+        return check(cSetopt($this->handle, $option, [$owned->cstr()]));
     }
 
+    #[docs::group: "Body and headers"]
     /**
      * The request body. libcurl copies it, so the string can die on the next line.
      *
@@ -202,78 +515,159 @@ public struct Easy
      * truncated. `data()` rather than `cstr()` for the same reason: the length is already
      * known, and a body doesn't have to be terminated at all.
      */
-    function setBody(const string& $bytes) : int32
+    function setBody(const string& $bytes) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
         int64 $size = $bytes->size();
-        int32 $code = setoptOff($this->handle, OffOption::postFieldSize->value(), $size);
 
-        if ($code != CODE_OK) {
-            return $code;
+        guard check(setoptOff($this->handle, OffOption::postFieldSize->value(), $size)) else ($e) {
+            return .error($e);
         }
 
-        return cSetopt($this->handle, OPT_COPYPOSTFIELDS, [$bytes->data()]);
+        // an empty body still hands over a real pointer. `COPYPOSTFIELDS` with NULL is a different
+        // request depending on the libcurl version, and size 0 plus "" is the documented zero-byte POST
+        if ($bytes->empty()) {
+            string $none = '';
+
+            return check(cSetopt($this->handle, OPT_COPYPOSTFIELDS, [$none->cstr()]));
+        }
+
+        return check(cSetopt($this->handle, OPT_COPYPOSTFIELDS, [$bytes->data()]));
     }
 
+    #[docs::group: "Body and headers"]
     /**
      * Adds one `Name: value` line to the request headers.
      */
-    function addHeader(const string& $line) : int32
+    function addHeader(const string& $line) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
         string $owned = nulTerminated($line);
-        ptr<uint8> $grown = cSlistAppend($this->slist, $owned->cstr());
+        ptr<curl_slist> $grown = cSlistAppend($this->slist, $owned->cstr());
 
-        if ($grown:$ == null) {
-            return CODE_OUT_OF_MEMORY;
+        if ($grown == null) {
+            return .error(.outOfMemory);
         }
 
         // the head only moves on the first append, and repeating the option is free
-        $this->slist:$ = $grown;
+        $this->slist = $grown;
 
-        return cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist:$]);
+        return check(cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist]));
     }
 
+    #[docs::group: "Options"]
     /**
      * A string option set to NULL. How you undo `CURLOPT_ACCEPT_ENCODING` after a default
      * asked for compression.
      */
-    function clearString(StringOption $option) : int32
+    function clearString(StringOption $option) : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
         ptr<uint8> $none = null;
 
-        return cSetopt($this->handle, $option->value(), [$none:$]);
+        return check(cSetopt($this->handle, $option->value(), [$none:$]));
     }
 
+    #[docs::group: "Body and headers"]
+    /**
+     * A `multipart/form-data` body, built into a `curl_mime` this handle owns.
+     *
+     * The handle owns it because libcurl reads it until the transfer ends, and only the
+     * handle knows when that is. `reset()` and the destructor free it, and so does the next
+     * `setForm`. A part libcurl refuses fails here, before any network: a file it can't
+     * read is `.readError`.
+     *
+     * **Set it after the method.** `CURLOPT_POST` flips the handle back to a plain POST,
+     * which would send the form as an empty body. `apply` does it in that order.
+     */
+    function setForm(const Form& $form) : status<Error>
+    {
+        if ($this->handle == null) {
+            return .error(.failedInit);
+        }
+
+        // freeing a bound mime unbinds it first, so the handle never points at freed memory
+        if ($this->mime != null) {
+            cMimeFree($this->mime);
+            $this->mime = null;
+        }
+
+        ptr<curl_mime> $mime = cMimeInit($this->handle);
+
+        if ($mime == null) {
+            return .error(.outOfMemory);
+        }
+
+        // held before the first part goes on, so a half-built form is still freed
+        $this->mime = $mime;
+
+        foreach ($form->parts as const &$part) {
+            guard mimePart($mime, $part) else ($e) {
+                return .error($e);
+            }
+        }
+
+        return check(cSetopt($this->handle, OPT_MIMEPOST, [$mime]));
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Where the response body goes. `.memory` until you say otherwise, and again after `reset()`.
+     */
+    function sink(Sink $sink) : void
+    {
+        $this->flow->sink = $sink;
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Where the request body comes from. Anything but `.text` makes the transfer an upload.
+     */
+    function source(Source $source) : void
+    {
+        $this->flow->source = $source;
+    }
+
+    #[docs::group: "Streaming"]
+    /**
+     * Called as the transfer moves, roughly once a second and whenever bytes arrive. Answer
+     * `false` to stop it, which fails with `.abortedByCallback`. `null` stops listening.
+     */
+    function progress(function<bool(const Progress&)>? $report) : void
+    {
+        $this->flow->progress = $report;
+    }
+
+    #[docs::group: "Body and headers"]
     /**
      * Drops every request header set so far.
      */
     function clearHeaders() : void
     {
-        if ($this->slist:$ != null) {
+        if ($this->slist != null) {
             cSlistFree($this->slist);
-            $this->slist:$ = null;
+            $this->slist = null;
         }
 
-        if ($this->handle:$ != null) {
-            cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist:$]);
+        if ($this->handle != null) {
+            cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist]);
         }
     }
 
     // ---- performing ---------------------------------------------------------------------------
 
+    #[docs::group: "Performing"]
     /**
-     * Runs the transfer. Answers a CURLcode.
+     * Runs the transfer.
      *
      * **The write and header pointer options are set here, not in the constructor.**
      * That's what frees this type from ever having to promise it doesn't move. libcurl
@@ -281,28 +675,175 @@ public struct Easy
      * value during a synchronous call. Set them once at construction and they'd be
      * dangling the moment the struct was handed over.
      */
-    function perform() : int32
+    function perform() : status<Error>
     {
-        if ($this->handle:$ == null) {
-            return CODE_FAILED_INIT;
+        if ($this->handle == null) {
+            return .error(.failedInit);
         }
 
-        $this->bodyBuf->clear();
+        $this->flow->body->clear();
+        $this->flow->received = 0;
+        $this->flow->abort = null;
+        $this->flow->pending = '';
+        $this->flow->offset = 0;
         $this->headBuf->clear();
 
-        ptr<string> $bodySink = &$this->bodyBuf;
+        ptr<Flow> $flowSink = &$this->flow;
         ptr<string> $headSink = &$this->headBuf;
+        ptr<uint8> $user = ptr<uint8>($flowSink:$);
 
-        extern function<usize(ptr<uint8>, usize, usize, ptr<uint8>)> $writer = &writeChunk;
+        // the source opens before the sink, so a missing upload never truncates the download path
+        guard $this->wireSource($user) else ($e) {
+            $this->closeEnds();
 
-        cSetopt($this->handle, OPT_WRITEFUNCTION, [$writer]);
-        cSetopt($this->handle, OPT_WRITEDATA, [ptr<uint8>($bodySink:$)]);
-        cSetopt($this->handle, OPT_HEADERFUNCTION, [$writer]);
+            return .error($e);
+        }
+
+        guard $this->openSink() else ($e) {
+            $this->closeEnds();
+
+            return .error($e);
+        }
+
+        extern function<usize(ptr<uint8>, usize, usize, ptr<uint8>)> $body = &writeBody;
+        extern function<usize(ptr<uint8>, usize, usize, ptr<uint8>)> $header = &writeChunk;
+
+        cSetopt($this->handle, OPT_WRITEFUNCTION, [$body]);
+        cSetopt($this->handle, OPT_WRITEDATA, [$user]);
+        cSetopt($this->handle, OPT_HEADERFUNCTION, [$header]);
         cSetopt($this->handle, OPT_HEADERDATA, [ptr<uint8>($headSink:$)]);
 
-        return cPerform($this->handle);
+        // libcurl's progress meter stays off unless someone is listening
+        if ($this->flow->progress != null) {
+            extern function<int32(ptr<uint8>, int64, int64, int64, int64)> $info = &xferInfo;
+
+            cSetopt($this->handle, OPT_XFERINFOFUNCTION, [$info]);
+            cSetopt($this->handle, OPT_XFERINFODATA, [$user]);
+            setoptLong($this->handle, OPT_NOPROGRESS, 0);
+        }
+        else {
+            setoptLong($this->handle, OPT_NOPROGRESS, 1);
+        }
+
+        status<Error> $done = check(cPerform($this->handle));
+        status<Error> $closed = $this->closeEnds();
+
+        // curl reports any refusal from `writeBody` as a write error. `abort` says which one it was
+        guard $done else ($e) {
+            $this->discard();
+
+            return .error($this->flow->abort ?? $e);
+        }
+
+        guard $closed else ($e) {
+            $this->discard();
+
+            return .error($e);
+        }
+
+        return .ok;
     }
 
+    /**
+     * Opens a file sink. `.writeError` when the path can't be created.
+     */
+    private function openSink() : status<Error>
+    {
+        match ($this->flow->sink) {
+            Sink::file($path) => {
+                std::io::file $out = guard std::io::create($path) else ($e) {
+                    return .error(.writeError);
+                }
+
+                $this->flow->out = $out;
+            },
+            else => {},
+        }
+
+        return .ok;
+    }
+
+    /**
+     * Turns a source into an upload: the read callback, `CURLOPT_UPLOAD`, and the size when
+     * it's known. `-1` is curl's own word for unknown. A `text` source is not an upload, and
+     * its body already went on as `COPYPOSTFIELDS`.
+     */
+    private function wireSource(ptr<uint8> $user) : status<Error>
+    {
+        int64 $size = -1;
+
+        match ($this->flow->source) {
+            Source::text => {
+                return .ok;
+            },
+            Source::file($path) => {
+                std::io::file $in = guard std::io::open($path, .read) else ($e) {
+                    return .error(.fileCouldNotReadFile);
+                }
+
+                int64 $known = guard $in->size() else ($e) {
+                    return .error(.fileCouldNotReadFile);
+                }
+
+                $this->flow->in = $in;
+                $size = $known;
+            },
+            Source::chunks($next, $total) => {
+                $size = $total;
+            },
+        }
+
+        extern function<usize(ptr<uint8>, usize, usize, ptr<uint8>)> $reader = &readBody;
+
+        cSetopt($this->handle, OPT_READFUNCTION, [$reader]);
+        cSetopt($this->handle, OPT_READDATA, [$user]);
+
+        guard $this->setLong(.upload, 1) else ($e) {
+            return .error($e);
+        }
+
+        return check(setoptOff($this->handle, OPT_INFILESIZE, $size));
+    }
+
+    /**
+     * Lets go of both files. The sink is flushed first, because a body that only reached the
+     * write window didn't reach the disk, and that's a failed download.
+     */
+    private function closeEnds() : status<Error>
+    {
+        $this->flow->in = null;
+
+        std::io::file $out = guard $this->flow->out else {
+            return .ok;
+        }
+
+        $this->flow->out = null;
+
+        usize $flushed = guard $out->flush() else ($e) {
+            $out->close();
+
+            return .error(.writeError);
+        }
+
+        $out->close();
+
+        return .ok;
+    }
+
+    /**
+     * Removes what a failed transfer left in a file sink. A path holds a whole body or nothing.
+     */
+    private function discard() : void
+    {
+        match ($this->flow->sink) {
+            Sink::file($path) => {
+                result<bool, std::io::ioerror> $gone = std::io::remove($path);
+            },
+            else => {},
+        }
+    }
+
+    #[docs::group: "Performing"]
     /**
      * Drops every option, and the request headers with them.
      *
@@ -312,18 +853,25 @@ public struct Easy
      */
     function reset() : void
     {
-        if ($this->handle:$ == null) {
+        if ($this->handle == null) {
             return;
         }
 
         cEasyReset($this->handle);
 
-        if ($this->slist:$ != null) {
+        if ($this->slist != null) {
             cSlistFree($this->slist);
-            $this->slist:$ = null;
+            $this->slist = null;
         }
 
-        $this->bodyBuf->clear();
+        // the reset already let go of it, so this only frees
+        if ($this->mime != null) {
+            cMimeFree($this->mime);
+            $this->mime = null;
+        }
+
+        // the sink, the source, the progress closure and the cap are options too
+        $this->flow = Flow();
         $this->headBuf->clear();
 
         $this->setLong(.noSignal, 1);
@@ -331,14 +879,25 @@ public struct Easy
 
     // ---- what came back -----------------------------------------------------------------------
 
+    #[docs::group: "Reading back"]
     /**
      * The response body. A zero byte in it is a byte like any other.
      */
     function body() : string
     {
-        return $this->bodyBuf;
+        return $this->flow->body;
     }
 
+    #[docs::group: "Reading back"]
+    /**
+     * How many body bytes the last transfer delivered, whichever sink took them.
+     */
+    function bytes() : int64
+    {
+        return $this->flow->received;
+    }
+
+    #[docs::group: "Reading back"]
     /**
      * Every response header block, status lines and all, exactly as they arrived.
      */
@@ -347,32 +906,30 @@ public struct Easy
         return $this->headBuf;
     }
 
-    /**
-     * The failure that goes with a CURLcode.
-     *
-     * libcurl's sentence for the CURLcode.
-     */
-    function error(int32 $code) : Error
-    {
-        return Error::from($code, str::from(cStrerror($code)));
-    }
-
     // ---- reading the handle back ----------------------------------------------------------------
 
+    #[docs::group: "Reading back"]
+    /**
+     * A `long` info about the last transfer: `infoLong(.responseCode)`. Zero without a handle.
+     */
     function infoLong(LongInfo $info) : int64
     {
-        if ($this->handle:$ == null) {
+        if ($this->handle == null) {
             return 0;
         }
 
         return getinfoLong($this->handle, $info->value());
     }
 
+    #[docs::group: "Reading back"]
+    /**
+     * A timing about the last transfer, in seconds from its start: `infoDouble(.connectTime)`.
+     */
     function infoDouble(DoubleInfo $info) : float64
     {
         float64 $value = 0.0;
 
-        if ($this->handle:$ == null) {
+        if ($this->handle == null) {
             return $value;
         }
 
@@ -381,6 +938,7 @@ public struct Easy
         return $value;
     }
 
+    #[docs::group: "Reading back"]
     /**
      * A string info, or nothing.
      *
@@ -391,7 +949,7 @@ public struct Easy
     {
         ptr<uint8> $out = null;
 
-        if ($this->handle:$ == null) {
+        if ($this->handle == null) {
             return null;
         }
 
@@ -406,11 +964,329 @@ public struct Easy
         return str::from($out);
     }
 
+    #[docs::group: "Reading back"]
     /**
      * The `CURL*` itself, for anything this type doesn't wrap.
+     *
+     * This library's externs are internal, so you declare your own `extern` for the C call
+     * you want. Don't free it: the handle still belongs to this `Easy`.
      */
-    function raw() : ptr<uint8>
+    function raw() : ptr<CURL>
     {
         return $this->handle;
     }
+}
+
+// ---- tests ------------------------------------------------------------------------------------
+//
+// the callbacks are private, so they're tested here, where they can be called directly with a
+// `Flow` built by hand. no handle, no transfer, and every branch reachable
+
+#[if: tests]
+/**
+ * Answers a fixed list, one per call, then `''` forever. A class so the closure that holds it
+ * shares the position instead of copying it.
+ */
+private class Script
+{
+    public array<string> $answers;
+    public usize $next;
+    public int32 $calls;
+
+    constructor(array<string> $answers)
+    {
+        $this->answers = $answers;
+        $this->next = 0;
+        $this->calls = 0;
+    }
+
+    public function take() : string
+    {
+        $this->calls = $this->calls + 1;
+
+        if ($this->next >= $this->answers->count()) {
+            return '';
+        }
+
+        string $out = $this->answers[$this->next];
+        $this->next = $this->next + 1;
+
+        return $out;
+    }
+}
+
+private function userOf(ptr<Flow> $at) : ptr<uint8>
+{
+    return ptr<uint8>($at:$);
+}
+
+/**
+ * Calls `readBody` with a buffer of `$room` bytes until it answers 0, and joins what it wrote.
+ */
+private function drain(ptr<Flow> $flow, usize $room) : string
+{
+    ptr<uint8> $user = userOf($flow);
+    string $out = '';
+
+    while (true) {
+        string $buf = '';
+        $buf->reserve($room);
+
+        usize $n = readBody($buf->spare(), 1, $room, $user);
+
+        if ($n == 0 || $n == READFUNC_ABORT) {
+            return $out;
+        }
+
+        assert($n <= $room, 'never more than curl has room for');
+
+        $buf->commit($n);
+        $out->append($buf);
+    }
+
+    return $out;
+}
+
+/**
+ * Hands `$text` to `writeBody` as one chunk, the way curl would.
+ */
+private function deliver(ptr<Flow> $flow, const string& $text) : usize
+{
+    ptr<const uint8> $data = $text->data();
+
+    return writeBody(ptr<uint8>($data:$), 1, $text->size(), userOf($flow));
+}
+
+private function scratchPath(const string& $name) : string
+{
+    return std::env::join(std::env::tmp(), $name);
+}
+#[end]
+
+#[group: "unit"]
+test read_body_splits_an_answer_across_small_buffers {
+    Script $script = Script(['abcdefghij']);
+    Flow $flow = Flow();
+    $flow->source = .chunks(function() : string { return $script->take(); }, -1);
+
+    assert(drain(&$flow, 4) == 'abcdefghij', 'the leftover waits in pending for the next call');
+    assert($script->calls == 2, 'one real answer, then the empty one that ends it');
+}
+
+#[group: "unit"]
+test read_body_joins_many_small_answers {
+    Script $script = Script(['ab', 'cde', 'f']);
+    Flow $flow = Flow();
+    $flow->source = .chunks(function() : string { return $script->take(); }, -1);
+
+    assert(drain(&$flow, 64) == 'abcdef', 'every answer, in order');
+}
+
+#[group: "unit"]
+test read_body_with_an_exact_fit_asks_again {
+    Script $script = Script(['abcd', 'efgh']);
+    Flow $flow = Flow();
+    $flow->source = .chunks(function() : string { return $script->take(); }, -1);
+
+    assert(drain(&$flow, 4) == 'abcdefgh', 'a used-up answer is never mistaken for the end');
+}
+
+#[group: "unit"]
+test read_body_ends_at_once_for_text_and_aborts_on_a_lost_file {
+    Flow $text = Flow();
+
+    assert(drain(&$text, 16)->empty(), 'a text source has nothing to stream');
+
+    Flow $file = Flow();
+    $file->source = .file('/nowhere');
+
+    string $buf = '';
+    $buf->reserve(16);
+
+    assert(readBody($buf->spare(), 1, 16, userOf(&$file)) == READFUNC_ABORT, 'no open file is an abort');
+
+    Error $why = guard $file->abort else {
+        die('the abort carried no reason');
+    }
+
+    assert($why == Error::readError, 'and the reason is the read side');
+}
+
+#[group: "unit"]
+test write_body_keeps_and_counts_a_memory_chunk {
+    Flow $flow = Flow();
+
+    assert(deliver(&$flow, 'hello') == 5, 'every byte taken');
+    assert(deliver(&$flow, " a\u{0}b") == 4, 'a zero byte is a byte');
+    assert($flow->body == "hello a\u{0}b", 'appended in order');
+    assert($flow->received == 9, 'and counted');
+    assert($flow->abort == null, 'with nothing to complain about');
+}
+
+#[group: "unit"]
+test write_body_refuses_past_the_cap {
+    Flow $flow = Flow();
+    $flow->cap = 8;
+
+    assert(deliver(&$flow, 'abcd') == 4, 'under the cap');
+    assert(deliver(&$flow, 'efgh') == 4, 'exactly at the cap is still fine');
+    assert(deliver(&$flow, 'i') == 0, 'one past it is refused');
+
+    Error $why = guard $flow->abort else {
+        die('the refusal carried no reason');
+    }
+
+    assert($why == Error::filesizeExceeded, 'as the size, not as a write error');
+    assert($flow->body == 'abcdefgh', 'and the refused chunk was not kept');
+}
+
+#[group: "unit"]
+test write_body_hands_chunks_to_the_closure {
+    Script $seen = Script(array<string>());
+    Flow $flow = Flow();
+    $flow->sink = .chunks(function(const string& $chunk) : bool {
+        $seen->answers[] = $chunk;
+
+        return $seen->answers->count() < 2;
+    });
+
+    assert(deliver(&$flow, 'one') == 3, 'the first chunk is taken');
+    assert(deliver(&$flow, 'two') == 0, 'the closure said stop on the second');
+    assert($flow->body->empty(), 'nothing was kept in memory');
+    assert($seen->answers[0] == 'one' && $seen->answers[1] == 'two', 'the closure saw both, in order');
+
+    Error $why = guard $flow->abort else {
+        die('the stop carried no reason');
+    }
+
+    assert($why == Error::abortedByCallback, 'and the reason is the callback');
+}
+
+#[group: "unit"]
+test write_body_without_an_open_file_is_a_write_error {
+    Flow $flow = Flow();
+    $flow->sink = .file('/nowhere');
+
+    assert(deliver(&$flow, 'x') == 0, 'nowhere to put it');
+
+    Error $why = guard $flow->abort else {
+        die('the refusal carried no reason');
+    }
+
+    assert($why == Error::writeError, 'a write error');
+}
+
+#[group: "unit"]
+test xfer_info_reports_and_can_stop {
+    Flow $quiet = Flow();
+
+    assert(xferInfo(userOf(&$quiet), 10, 5, 0, 0) == 0, 'nobody listening is carry on');
+
+    Script $seen = Script(array<string>());
+    Flow $flow = Flow();
+    $flow->progress = function(const Progress& $p) : bool {
+        $seen->answers[] = "{$p->downloaded}/{$p->downloadTotal} {$p->uploaded}/{$p->uploadTotal}";
+
+        return $p->downloaded < 10;
+    };
+
+    assert(xferInfo(userOf(&$flow), 100, 5, 40, 20) == 0, 'under ten, carry on');
+    assert(xferInfo(userOf(&$flow), 100, 10, 40, 40) == 1, 'the closure said stop');
+    assert($seen->answers[0] == '5/100 20/40', 'now before total, for both directions');
+}
+
+#[group: "unit"]
+test nul_terminated_copies_only_a_window {
+    string $whole = 'Content-Type: text/plain';
+    string $window = $whole->sub(0, 12);
+
+    assert(nulTerminated($whole)->terminated(), 'an owned string comes back as it is');
+    assert(nulTerminated($window)->terminated(), 'a window comes back terminated');
+    assert(nulTerminated($window) == 'Content-Type', 'with exactly its own bytes');
+}
+
+#[group: "unit"]
+test the_cap_is_checked_not_sent {
+    Easy $handle = Easy();
+
+    assert($handle->open(), 'a handle');
+
+    status<Error> $negative = $handle->setOff(.maxFileSize, -1);
+
+    assert($negative->failed() && $negative->failure() == Error::badFunctionArgument, 'a negative cap is refused');
+
+    status<Error> $raw = $handle->setRaw(OffOption::maxFileSize->value(), -1);
+
+    assert($raw->failed() && $raw->failure() == Error::badFunctionArgument, 'by number too, it is the same option');
+    assert(!$handle->setOff(.maxFileSize, 0)->failed(), 'zero is no cap');
+    assert(!$handle->setOff(.postFieldSize, 3)->failed(), 'any other off option goes to libcurl');
+}
+
+#[group: "unit"]
+test an_easy_handle_reads_resets_and_reads_again {
+    string $path = scratchPath('libcurl_easy_inline.txt');
+
+    usize $written = guard std::io::writefile($path, 'twelve bytes') else ($e) {
+        die("could not write the fixture: {$e}");
+    }
+
+    Easy $handle = Easy();
+
+    guard $handle->setString(.url, std::env::file_url($path)) else ($e) {
+        die("the url was refused: {$e}");
+    }
+
+    guard $handle->setOff(.maxFileSize, 4) else ($e) {
+        die("the cap was refused: {$e}");
+    }
+
+    status<Error> $capped = $handle->perform();
+
+    assert($capped->failed() && $capped->failure() == Error::filesizeExceeded, 'the cap held');
+
+    // reset drops the cap with every other option, so the url has to go on again
+    $handle->reset();
+
+    guard $handle->setString(.url, std::env::file_url($path)) else ($e) {
+        die("the url was refused after the reset: {$e}");
+    }
+
+    guard $handle->perform() else ($e) {
+        die("the uncapped read failed: {$e}");
+    }
+
+    guard $handle->perform() else ($e) {
+        die("the second read failed: {$e}");
+    }
+
+    assert($handle->body() == 'twelve bytes', 'the body of the last perform, not two of them');
+    assert($handle->bytes() == 12, 'and the count of the last perform');
+    assert(($handle->infoString(.effectiveUrl) ?? '') == std::env::file_url($path), 'the url reads back');
+    assert($handle->infoLong(.responseCode) == 0, 'file:// has no status');
+    assert($handle->raw() != null, 'and the CURL* is there for anything unwrapped');
+
+    result<bool, std::io::ioerror> $gone = std::io::remove($path);
+}
+
+#[group: "unit"]
+test headers_and_forms_can_be_replaced_on_one_handle {
+    Easy $handle = Easy();
+
+    assert(!$handle->addHeader('X-One: 1')->failed(), 'a header');
+    assert(!$handle->addHeader('X-Two: 2')->failed(), 'a second grows the list');
+
+    $handle->clearHeaders();
+
+    assert(!$handle->addHeader('X-Three: 3')->failed(), 'a fresh list after clearing');
+
+    Form $first = Form();
+    $first->field('a', '1');
+
+    Form $second = Form();
+    $second->field('b', '2');
+
+    assert(!$handle->setForm($first)->failed(), 'a form');
+    assert(!$handle->setForm($second)->failed(), 'and another, which frees the first');
+    assert(!$handle->clearString(.acceptEncoding)->failed(), 'a string option can be cleared');
+    assert(!$handle->setBody('')->failed(), 'an empty body is a real body');
 }

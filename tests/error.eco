@@ -1,71 +1,86 @@
 /**
- * Error as an enum: from a CURLcode, back out as a number, the leftover case.
+ * Error as an open integer enum: from a CURLcode, leftover codes, the sentence.
  */
 
 function isTimeout(const curl::Error& $e) : bool
 {
-    match ($e) {
-        curl::Error::timeout($m) => {
-            return true;
-        },
-        else => {
-            return false;
-        },
-    }
+    return $e == curl::Error::timeout;
 }
 
 function otherCode(const curl::Error& $e) : int32
 {
-    match ($e) {
-        curl::Error::other($code, $m) => {
-            return $code;
-        },
-        else => {
-            return -1;
-        },
-    }
+    // every case, no `else`. echoc 0.8.0 sends a leftover to `else` when an `other` arm sits
+    // beside it, and `== curl::Error::other` is refused, so this is the shape that works
+    return match ($e) {
+        curl::Error::unsupportedProtocol => -1,
+        curl::Error::failedInit => -1,
+        curl::Error::urlMalformat => -1,
+        curl::Error::couldNotResolveProxy => -1,
+        curl::Error::couldNotResolveHost => -1,
+        curl::Error::couldNotConnect => -1,
+        curl::Error::httpReturnedError => -1,
+        curl::Error::writeError => -1,
+        curl::Error::readError => -1,
+        curl::Error::outOfMemory => -1,
+        curl::Error::timeout => -1,
+        curl::Error::sslConnectError => -1,
+        curl::Error::fileCouldNotReadFile => -1,
+        curl::Error::abortedByCallback => -1,
+        curl::Error::badFunctionArgument => -1,
+        curl::Error::tooManyRedirects => -1,
+        curl::Error::unknownOption => -1,
+        curl::Error::peerFailedVerification => -1,
+        curl::Error::filesizeExceeded => -1,
+        curl::Error::other => $e->value(),
+    };
 }
 
 #[group: "unit"]
 test from_maps_a_named_code {
-    curl::Error $e = curl::Error::from(curl::CODE_OPERATION_TIMEDOUT, 'ran out of time');
+    curl::Error $e = curl::Error::from(28);
 
     assert(isTimeout($e), '28 is timeout');
-    assert($e->value() == curl::CODE_OPERATION_TIMEDOUT, 'and the ABI number comes back');
-    assert($e->message() == 'ran out of time', 'the sentence is kept');
+    assert($e->value() == 28, 'and the ABI number comes back');
+    assert(!$e->message()->empty(), 'libcurl still has a sentence');
 }
 
 #[group: "unit"]
 test from_keeps_an_unknown_code {
-    curl::Error $e = curl::Error::from(999, 'mystery');
+    curl::Error $e = curl::Error::from(999);
 
     assert(otherCode($e) == 999, 'an unmapped number is other, with the number C handed us');
     assert($e->value() == 999, 'value() is that same number');
-    assert($e->message() == 'mystery', 'with the sentence');
 }
 
+/**
+ * The literals are curl.h's. This is what pins every case to the ABI number it claims.
+ */
 #[group: "unit"]
-test from_round_trips_every_named_code {
-    assert(curl::Error::from(curl::CODE_UNSUPPORTED_PROTOCOL, 'x')->value() == curl::CODE_UNSUPPORTED_PROTOCOL, 'unsupported');
-    assert(curl::Error::from(curl::CODE_FAILED_INIT, 'x')->value() == curl::CODE_FAILED_INIT, 'init');
-    assert(curl::Error::from(curl::CODE_URL_MALFORMAT, 'x')->value() == curl::CODE_URL_MALFORMAT, 'url');
-    assert(curl::Error::from(curl::CODE_COULDNT_RESOLVE_PROXY, 'x')->value() == curl::CODE_COULDNT_RESOLVE_PROXY, 'proxy');
-    assert(curl::Error::from(curl::CODE_COULDNT_RESOLVE_HOST, 'x')->value() == curl::CODE_COULDNT_RESOLVE_HOST, 'host');
-    assert(curl::Error::from(curl::CODE_COULDNT_CONNECT, 'x')->value() == curl::CODE_COULDNT_CONNECT, 'connect');
-    assert(curl::Error::from(curl::CODE_HTTP_RETURNED_ERROR, 'x')->value() == curl::CODE_HTTP_RETURNED_ERROR, 'http');
-    assert(curl::Error::from(curl::CODE_WRITE_ERROR, 'x')->value() == curl::CODE_WRITE_ERROR, 'write');
-    assert(curl::Error::from(curl::CODE_OUT_OF_MEMORY, 'x')->value() == curl::CODE_OUT_OF_MEMORY, 'oom');
-    assert(curl::Error::from(curl::CODE_OPERATION_TIMEDOUT, 'x')->value() == curl::CODE_OPERATION_TIMEDOUT, 'timeout');
-    assert(curl::Error::from(curl::CODE_SSL_CONNECT_ERROR, 'x')->value() == curl::CODE_SSL_CONNECT_ERROR, 'ssl');
-    assert(curl::Error::from(curl::CODE_FILE_COULDNT_READ_FILE, 'x')->value() == curl::CODE_FILE_COULDNT_READ_FILE, 'file');
-    assert(curl::Error::from(curl::CODE_TOO_MANY_REDIRECTS, 'x')->value() == curl::CODE_TOO_MANY_REDIRECTS, 'redirects');
-    assert(curl::Error::from(curl::CODE_UNKNOWN_OPTION, 'x')->value() == curl::CODE_UNKNOWN_OPTION, 'option');
-    assert(curl::Error::from(curl::CODE_PEER_FAILED_VERIFICATION, 'x')->value() == curl::CODE_PEER_FAILED_VERIFICATION, 'peer');
+test every_named_case_is_its_curlcode {
+    assert(curl::Error::from(1) == curl::Error::unsupportedProtocol, 'CURLE_UNSUPPORTED_PROTOCOL');
+    assert(curl::Error::from(2) == curl::Error::failedInit, 'CURLE_FAILED_INIT');
+    assert(curl::Error::from(3) == curl::Error::urlMalformat, 'CURLE_URL_MALFORMAT');
+    assert(curl::Error::from(5) == curl::Error::couldNotResolveProxy, 'CURLE_COULDNT_RESOLVE_PROXY');
+    assert(curl::Error::from(6) == curl::Error::couldNotResolveHost, 'CURLE_COULDNT_RESOLVE_HOST');
+    assert(curl::Error::from(7) == curl::Error::couldNotConnect, 'CURLE_COULDNT_CONNECT');
+    assert(curl::Error::from(22) == curl::Error::httpReturnedError, 'CURLE_HTTP_RETURNED_ERROR');
+    assert(curl::Error::from(23) == curl::Error::writeError, 'CURLE_WRITE_ERROR');
+    assert(curl::Error::from(26) == curl::Error::readError, 'CURLE_READ_ERROR');
+    assert(curl::Error::from(27) == curl::Error::outOfMemory, 'CURLE_OUT_OF_MEMORY');
+    assert(curl::Error::from(28) == curl::Error::timeout, 'CURLE_OPERATION_TIMEDOUT');
+    assert(curl::Error::from(35) == curl::Error::sslConnectError, 'CURLE_SSL_CONNECT_ERROR');
+    assert(curl::Error::from(37) == curl::Error::fileCouldNotReadFile, 'CURLE_FILE_COULDNT_READ_FILE');
+    assert(curl::Error::from(42) == curl::Error::abortedByCallback, 'CURLE_ABORTED_BY_CALLBACK');
+    assert(curl::Error::from(43) == curl::Error::badFunctionArgument, 'CURLE_BAD_FUNCTION_ARGUMENT');
+    assert(curl::Error::from(47) == curl::Error::tooManyRedirects, 'CURLE_TOO_MANY_REDIRECTS');
+    assert(curl::Error::from(48) == curl::Error::unknownOption, 'CURLE_UNKNOWN_OPTION');
+    assert(curl::Error::from(60) == curl::Error::peerFailedVerification, 'CURLE_PEER_FAILED_VERIFICATION');
+    assert(curl::Error::from(63) == curl::Error::filesizeExceeded, 'CURLE_FILESIZE_EXCEEDED');
 }
 
 #[group: "unit"]
 test interpolating_an_error_is_the_sentence {
-    curl::Error $e = curl::Error::timeout('ran out of time');
+    curl::Error $e = curl::Error::timeout;
 
-    assert("{$e}" == 'ran out of time', 'str::from reads the message');
+    assert("{$e}" == $e->message(), 'str::from reads the message');
 }

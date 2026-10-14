@@ -14,12 +14,7 @@
 
 function fixturePath(const string& $name) : string
 {
-    string $path = str::from(std::env::tmp());
-
-    $path->append(std::env::DS);
-    $path->append($name);
-
-    return $path;
+    return std::env::join(std::env::tmp(), $name);
 }
 
 #[group: "unit"]
@@ -45,6 +40,10 @@ test reads_a_file_url {
     assert($res->body == $text, 'the body came back through the callback');
     assert($res->status == 0, 'file:// carries no HTTP status');
     assert($res->seconds >= 0.0, 'the timing was read back');
+    assert($res->version == curl::HttpVersion::none, 'file:// speaks no HTTP');
+    assert($res->redirects == 0, 'and follows nothing');
+    assert($res->ip->empty(), 'and connects to nobody');
+    assert($res->timings->firstByte <= $res->seconds, 'every mark lands before the end');
 
     bool $gone = guard std::io::remove($path) else ($e) {
         die("could not clean up: {$e}");
@@ -70,7 +69,7 @@ test an_unknown_scheme_is_refused {
     result<curl::Response, curl::Error> $outcome = curl::send(.get('nope://example.com/'));
 
     assert($outcome->failed(), 'libcurl does not know that scheme');
-    assert($outcome->failure()->value() == curl::CODE_UNSUPPORTED_PROTOCOL, 'and says which way');
+    assert($outcome->failure() == curl::Error::unsupportedProtocol, 'and says which way');
 }
 
 /**
@@ -128,11 +127,14 @@ test a_client_reuses_its_handle {
 #[group: "unit"]
 test error_without_perform_does_not_walk_garbage {
     curl::Easy $handle = curl::Easy();
-    int32 $code = $handle->setRaw(999999, 1);
-    curl::Error $err = $handle->error($code);
+    status<curl::Error> $set = $handle->setRaw(999999, 1);
+
+    assert($set->failed(), 'libcurl refused the option');
+
+    curl::Error $err = $set->failure();
 
     assert(!$err->message()->empty(), 'there is a sentence even though perform never ran');
-    assert($err->value() == curl::CODE_UNKNOWN_OPTION, 'and the code is the one setRaw answered');
+    assert($err == curl::Error::unknownOption, 'and the code is the one setRaw answered');
 }
 
 #[group: "unit"]
@@ -143,7 +145,7 @@ test a_raw_unknown_option_fails_send {
     result<curl::Response, curl::Error> $outcome = curl::send($req);
 
     assert($outcome->failed(), 'send did not run the transfer');
-    assert($outcome->failure()->value() == curl::CODE_UNKNOWN_OPTION, 'and the code is the one setRaw answered');
+    assert($outcome->failure() == curl::Error::unknownOption, 'and the code is the one setRaw answered');
 }
 
 #[group: "unit"]
@@ -154,7 +156,7 @@ test a_client_raw_unknown_option_fails_send {
     result<curl::Response, curl::Error> $outcome = $client->send(.get(std::env::file_url(fixturePath('libcurl_unused'))));
 
     assert($outcome->failed(), 'send did not run the transfer');
-    assert($outcome->failure()->value() == curl::CODE_UNKNOWN_OPTION, 'and the client hatch reports it too');
+    assert($outcome->failure() == curl::Error::unknownOption, 'and the client hatch reports it too');
 }
 
 #[group: "unit"]

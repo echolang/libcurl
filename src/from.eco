@@ -12,12 +12,26 @@
 
 namespace str;
 
+/**
+ * libcurl's sentence for the code, the same as `Error::message`. What `"{$e}"` prints.
+ */
 public function from(const curl::Error& $e) : string
 {
     return $e->message();
 }
 
+/**
+ * The protocol as a status line spells it, `HTTP/1.1`. What `"{$res->version}"` prints.
+ */
+public function from(const curl::HttpVersion& $v) : string
+{
+    return $v->wire();
+}
+
+/**
+ * The status and the body size, `200 (512 bytes)`. What `"{$res}"` prints.
+ */
 public function from(const curl::Response& $r) : string
 {
-    return "{$r->status} ({$r->body->size()} bytes)";
+    return "{$r->status} ({$r->bytes} bytes)";
 }

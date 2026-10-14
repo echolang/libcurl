@@ -1,0 +1,170 @@
+/**
+ * A `multipart/form-data` body, as a value.
+ *
+ * `Query` is the other form. It encodes to `application/x-www-form-urlencoded`, which is
+ * fine for a login and useless for a file. This one goes out as parts, and a part can be a
+ * file on disk. `.postForm($url, $query)` and `.postForm($url, $form)` are the same verb,
+ * and the argument picks the encoding.
+ *
+ * **A value, not a handle.** No destructor, so a `Request` holding one still copies like
+ * any other struct. The `curl_mime` is built from it at `send` time and belongs to the
+ * `Easy` that sends it, which is the only thing that knows when libcurl is done reading.
+ * libcurl copies every name, type, and text part it's handed. A `file` part is the one
+ * that isn't held in memory at all: libcurl reads it from disk while it sends.
+ *
+ * libcurl writes the `Content-Type: multipart/form-data; boundary=...` header itself. Set
+ * your own and the boundary is gone, so the server can't split the parts.
+ */
+
+namespace curl;
+
+/**
+ * What a part carries.
+ */
+public enum PartBody
+{
+    /**
+     * These bytes, verbatim. A zero byte in them is a byte like any other.
+     */
+    case text(string $bytes);
+
+    /**
+     * The file at this path, read while the request is sent. A path libcurl can't read
+     * fails `send` with `.readError` before anything goes out.
+     */
+    case file(string $path);
+}
+
+/**
+ * One part of a form. The fields are public, so anything the helpers on `Form` don't
+ * spell is still a field write away.
+ */
+public struct Part
+{
+    public string $name;
+    public PartBody $body;
+
+    /**
+     * The filename the server sees. `null` sends none for a text part and the path's last
+     * segment for a file part.
+     */
+    public string? $filename;
+
+    /**
+     * The part's `Content-Type`. `null` lets libcurl decide. It knows a handful of extensions
+     * (`.txt`, `.png`, `.pdf`, ...). Past those, a file from disk goes as
+     * `application/octet-stream` and everything else goes without one. Pass a type for a
+     * `.csv` or a `.json`.
+     */
+    public string? $type;
+}
+
+#[docs::example: "examples/upload.eco"]
+/**
+ * A `multipart/form-data` body: fields and files, in order. Send it with
+ * `Request::postForm($url, $form)`.
+ *
+ * It's a value. Nothing touches the disk until `send`, and a file part is read while it goes
+ * out, never held in memory. libcurl writes the `Content-Type` header and its boundary, so
+ * don't set your own.
+ */
+public struct Form
+{
+    /** In the order they go on the wire. */
+    public array<Part> $parts;
+
+    /**
+     * No parts yet.
+     */
+    constructor()
+    {
+        $this->parts = array<Part>();
+    }
+
+    /**
+     * How many parts.
+     */
+    const function count() : usize
+    {
+        return $this->parts->count();
+    }
+
+    /**
+     * A plain field, the multipart spelling of `name=value`.
+     */
+    function field(const string& $name, const string& $value) : void
+    {
+        $this->parts[] = Part($name, .text($value), null, null);
+    }
+
+    /**
+     * A file from disk, sent under its own name. `$type` empty lets libcurl guess.
+     */
+    function file(const string& $name, const string& $path, const string& $type = '') : void
+    {
+        $this->parts[] = Part($name, .file($path), null, optional($type));
+    }
+
+    /**
+     * A file that's already in memory, sent as if it were `$filename` on disk.
+     */
+    function upload(const string& $name, const string& $filename, const string& $bytes, const string& $type = '') : void
+    {
+        $this->parts[] = Part($name, .text($bytes), $filename, optional($type));
+    }
+}
+
+// the helpers take `''` for "not given". the part stores that as nothing
+private function optional(const string& $text) : string?
+{
+    if ($text->empty()) {
+        return null;
+    }
+
+    return $text;
+}
+
+/**
+ * Can this part's name, filename, and type go out as part headers?
+ *
+ * The same argument as `headerSafe`. A CR or LF would end the `Content-Disposition` line
+ * early and start one the caller never wrote, and a zero byte would cut the C string libcurl
+ * reads. An empty name is a field the server has no way to look up. The bytes of a text
+ * part go out with their length and are never checked.
+ */
+internal function partSafe(const Part& $part) : bool
+{
+    if ($part->name->empty() || breaksLine($part->name)) {
+        return false;
+    }
+
+    string $filename = $part->filename ?? '';
+    string $type = $part->type ?? '';
+
+    if (breaksLine($filename) || breaksLine($type)) {
+        return false;
+    }
+
+    match ($part->body) {
+        PartBody::file($path) => {
+            return !$path->empty() && !breaksLine($path);
+        },
+        else => {
+            return true;
+        },
+    }
+}
+
+#[group: "unit"]
+test an_empty_helper_argument_is_nothing {
+    assert(optional('') == null, 'empty is not given');
+    assert((optional('text/csv') ?? '') == 'text/csv', 'anything else is kept');
+}
+
+#[group: "unit"]
+test a_file_part_needs_a_path {
+    assert(partSafe(Part('a', .text(''), null, null)), 'an empty text part is fine');
+    assert(!partSafe(Part('a', .file(''), null, null)), 'a file part with no path is not');
+    assert(!partSafe(Part('a', .file("x\ny"), null, null)), 'nor one with a newline in it');
+    assert(!partSafe(Part("a\u{0}b", .text('v'), null, null)), 'a zero byte in a name would cut it');
+}
