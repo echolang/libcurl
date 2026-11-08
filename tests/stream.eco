@@ -30,7 +30,7 @@ function fixture(const string& $name, const string& $text) : string
 {
     string $path = fixturePath($name);
 
-    usize $written = guard std::io::writefile($path, $text) else ($e) {
+    usize $written = guard std::fs::writefile($path, $text) else ($e) {
         die("could not write the fixture: {$e}");
     }
 
@@ -39,12 +39,12 @@ function fixture(const string& $name, const string& $text) : string
 
 function cleanup(const string& $path) : void
 {
-    result<bool, std::io::ioerror> $gone = std::io::remove($path);
+    result<bool, std::io::ioerror> $gone = std::fs::remove($path);
 }
 
 function present(const string& $path) : bool
 {
-    bool $there = guard std::io::exists($path) else ($e) {
+    bool $there = guard std::fs::exists($path) else ($e) {
         return false;
     }
 
@@ -57,14 +57,14 @@ test save_to_writes_the_body_to_a_file {
     string $source = fixture('libcurl_stream_source.txt', $text);
     string $target = fixturePath('libcurl_stream_saved.txt');
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->saveTo($target);
 
     curl::Response $res = guard curl::send($req) else ($e) {
         die("the transfer failed: {$e}");
     }
 
-    string $saved = guard std::io::readfile($target) else ($e) {
+    string $saved = guard std::fs::readfile($target) else ($e) {
         die("the download is not there: {$e}");
     }
 
@@ -80,7 +80,7 @@ test save_to_writes_the_body_to_a_file {
 test a_memory_body_counts_its_bytes {
     string $source = fixture('libcurl_stream_count.txt', 'twelve bytes');
 
-    curl::Response $res = guard curl::send(.get(std::env::file_url($source))) else ($e) {
+    curl::Response $res = guard curl::send(.get(fileUrl($source))) else ($e) {
         die("the transfer failed: {$e}");
     }
 
@@ -96,7 +96,7 @@ test chunks_arrive_in_order {
     string $source = fixture('libcurl_stream_chunks.txt', $text);
     Tally $seen = Tally();
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->onChunk(function(const string& $chunk) : bool {
         $seen->text->append($chunk);
         $seen->calls = $seen->calls + 1;
@@ -119,7 +119,7 @@ test chunks_arrive_in_order {
 test a_chunk_closure_can_stop_the_transfer {
     string $source = fixture('libcurl_stream_stop.txt', largeText());
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->onChunk(function(const string& $chunk) : bool {
         return false;
     });
@@ -136,7 +136,7 @@ test a_chunk_closure_can_stop_the_transfer {
 test max_bytes_stops_a_large_body {
     string $source = fixture('libcurl_stream_cap.txt', largeText());
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->maxBytes(10);
 
     result<curl::Response, curl::Error> $outcome = curl::send($req);
@@ -155,12 +155,12 @@ test max_bytes_zero_is_no_cap_and_the_request_wins {
     curl::Client $client = curl::Client();
     $client->maxBytes(10);
 
-    result<curl::Response, curl::Error> $capped = $client->send(.get(std::env::file_url($source)));
+    result<curl::Response, curl::Error> $capped = $client->send(.get(fileUrl($source)));
 
     assert($capped->failed(), 'the client cap applies to a request that says nothing');
     assert($capped->failure() == curl::Error::filesizeExceeded, 'as a size error');
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->maxBytes(0);
 
     curl::Response $res = guard $client->send($req) else ($e) {
@@ -177,7 +177,7 @@ test a_failed_save_leaves_no_file_behind {
     string $source = fixture('libcurl_stream_partial.txt', largeText());
     string $target = fixturePath('libcurl_stream_partial_saved.txt');
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->saveTo($target);
     $req->maxBytes(10);
 
@@ -194,9 +194,9 @@ test an_unwritable_save_path_is_a_write_error {
     string $source = fixture('libcurl_stream_nowhere.txt', 'body');
     // bound first: echoc 0.8 hands back a corrupted path when join takes a temporary string
     string $missing = fixturePath('libcurl_no_such_directory');
-    string $target = std::env::join($missing, 'saved.txt');
+    string $target = std::fs::join($missing, 'saved.txt')->string();
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->saveTo($target);
 
     result<curl::Response, curl::Error> $outcome = curl::send($req);
@@ -212,7 +212,7 @@ test progress_is_reported {
     string $source = fixture('libcurl_stream_progress.txt', largeText());
     Tally $seen = Tally();
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->onProgress(function(const curl::Progress& $p) : bool {
         $seen->calls = $seen->calls + 1;
 
@@ -232,7 +232,7 @@ test progress_is_reported {
 test progress_can_cancel {
     string $source = fixture('libcurl_stream_cancel.txt', largeText());
 
-    curl::Request $req = .get(std::env::file_url($source));
+    curl::Request $req = .get(fileUrl($source));
     $req->onProgress(function(const curl::Progress& $p) : bool {
         return false;
     });
@@ -251,14 +251,14 @@ test upload_file_copies_byte_for_byte {
     string $source = fixture('libcurl_stream_upload_src.txt', $text);
     string $target = fixturePath('libcurl_stream_upload_dst.txt');
 
-    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    curl::Request $req = curl::Request(.put, fileUrl($target));
     $req->uploadFile($source);
 
     curl::Response $res = guard curl::send($req) else ($e) {
         die("the upload failed: {$e}");
     }
 
-    string $landed = guard std::io::readfile($target) else ($e) {
+    string $landed = guard std::fs::readfile($target) else ($e) {
         die("the upload is not there: {$e}");
     }
 
@@ -273,7 +273,7 @@ test upload_stream_with_unknown_size {
     string $target = fixturePath('libcurl_stream_upload_gen.txt');
     Tally $sent = Tally();
 
-    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    curl::Request $req = curl::Request(.put, fileUrl($target));
     $req->uploadStream(function() : string {
         if ($sent->calls == 3) {
             return '';
@@ -288,7 +288,7 @@ test upload_stream_with_unknown_size {
         die("the upload failed: {$e}");
     }
 
-    string $landed = guard std::io::readfile($target) else ($e) {
+    string $landed = guard std::fs::readfile($target) else ($e) {
         die("the upload is not there: {$e}");
     }
 
@@ -301,7 +301,7 @@ test upload_stream_with_unknown_size {
 test a_missing_upload_source_is_refused {
     string $target = fixturePath('libcurl_stream_upload_none.txt');
 
-    curl::Request $req = curl::Request(.put, std::env::file_url($target));
+    curl::Request $req = curl::Request(.put, fileUrl($target));
     $req->uploadFile(fixturePath('libcurl_no_such_upload'));
 
     result<curl::Response, curl::Error> $outcome = curl::send($req);
@@ -318,14 +318,14 @@ test a_client_forgets_the_last_sink {
 
     curl::Client $client = curl::Client();
 
-    curl::Request $first = .get(std::env::file_url($source));
+    curl::Request $first = .get(fileUrl($source));
     $first->saveTo($target);
 
     curl::Response $saved = guard $client->send($first) else ($e) {
         die("the first transfer failed: {$e}");
     }
 
-    curl::Response $second = guard $client->send(.get(std::env::file_url($source))) else ($e) {
+    curl::Response $second = guard $client->send(.get(fileUrl($source))) else ($e) {
         die("the second transfer failed: {$e}");
     }
 

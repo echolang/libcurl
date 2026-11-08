@@ -751,7 +751,7 @@ public struct Easy
     {
         match ($this->flow->sink) {
             Sink::file($path) => {
-                std::io::file $out = guard std::io::create($path) else ($e) {
+                std::io::file $out = guard std::fs::create($path) else ($e) {
                     return .error(.writeError);
                 }
 
@@ -777,7 +777,7 @@ public struct Easy
                 return .ok;
             },
             Source::file($path) => {
-                std::io::file $in = guard std::io::open($path, .read) else ($e) {
+                std::io::file $in = guard std::fs::open($path, .read) else ($e) {
                     return .error(.fileCouldNotReadFile);
                 }
 
@@ -837,7 +837,7 @@ public struct Easy
     {
         match ($this->flow->sink) {
             Sink::file($path) => {
-                result<bool, std::io::ioerror> $gone = std::io::remove($path);
+                result<bool, std::io::ioerror> $gone = std::fs::remove($path);
             },
             else => {},
         }
@@ -1059,7 +1059,7 @@ private function deliver(ptr<Flow> $flow, const string& $text) : usize
 
 private function scratchPath(const string& $name) : string
 {
-    return std::env::join(std::env::tmp(), $name);
+    return std::fs::join(std::env::tmp(), $name)->string();
 }
 #[end]
 
@@ -1226,13 +1226,13 @@ test the_cap_is_checked_not_sent {
 test an_easy_handle_reads_resets_and_reads_again {
     string $path = scratchPath('libcurl_easy_inline.txt');
 
-    usize $written = guard std::io::writefile($path, 'twelve bytes') else ($e) {
+    usize $written = guard std::fs::writefile($path, 'twelve bytes') else ($e) {
         die("could not write the fixture: {$e}");
     }
 
     Easy $handle = Easy();
 
-    guard $handle->setString(.url, std::env::file_url($path)) else ($e) {
+    guard $handle->setString(.url, std::fs::path($path)->file_url() ?? '') else ($e) {
         die("the url was refused: {$e}");
     }
 
@@ -1247,7 +1247,7 @@ test an_easy_handle_reads_resets_and_reads_again {
     // reset drops the cap with every other option, so the url has to go on again
     $handle->reset();
 
-    guard $handle->setString(.url, std::env::file_url($path)) else ($e) {
+    guard $handle->setString(.url, std::fs::path($path)->file_url() ?? '') else ($e) {
         die("the url was refused after the reset: {$e}");
     }
 
@@ -1269,7 +1269,7 @@ test an_easy_handle_reads_resets_and_reads_again {
     assert($handle->infoLong(.responseCode) == 0, 'file:// has no status');
     assert($handle->raw() != null, 'and the CURL* is there for anything unwrapped');
 
-    result<bool, std::io::ioerror> $gone = std::io::remove($path);
+    result<bool, std::io::ioerror> $gone = std::fs::remove($path);
 }
 
 #[group: "unit"]

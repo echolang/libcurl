@@ -3,14 +3,14 @@
 //
 //   echoc run -m . examples/download.eco
 
-string $source = std::env::join(std::env::tmp(), 'libcurl_download_source.txt');
-string $target = std::env::join(std::env::tmp(), 'libcurl_download_target.txt');
+string $source = std::fs::join(std::env::tmp(), 'libcurl_download_source.txt')->string();
+string $target = std::fs::join(std::env::tmp(), 'libcurl_download_target.txt')->string();
 
-usize $written = guard std::io::writefile($source, str::repeat('a line of the body\n', 50000)) else ($e) {
+usize $written = guard std::fs::writefile($source, str::repeat('a line of the body\n', 50000)) else ($e) {
     die("could not write the fixture: {$e}");
 }
 
-curl::Request $req = .get(std::env::file_url($source));
+curl::Request $req = .get(std::fs::path($source)->file_url() ?? '');
 $req->saveTo($target);
 $req->onProgress(function(const curl::Progress& $p) : bool {
     echo "{$p->downloaded} of {$p->downloadTotal} bytes";
@@ -27,7 +27,7 @@ curl::Response $res = guard curl::send($req) else ($e) {
 echo "saved {$res->bytes} bytes, body in memory: {$res->body->size()}";
 
 // the same download with a cap it can't fit under. the partial file is removed again
-curl::Request $capped = .get(std::env::file_url($source));
+curl::Request $capped = .get(std::fs::path($source)->file_url() ?? '');
 $capped->saveTo($target);
 $capped->maxBytes(1024);
 
@@ -39,6 +39,6 @@ if ($over->failed()) {
     echo "capped: {$err}";
 }
 
-bool $gone = guard std::io::remove($source) else ($e) {
+bool $gone = guard std::fs::remove($source) else ($e) {
     die("could not clean up: {$e}");
 }

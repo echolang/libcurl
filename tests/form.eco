@@ -142,9 +142,9 @@ test a_client_forgets_the_last_form {
     curl::Client $client = curl::Client();
 
     // whatever file:// makes of a form doesn't matter. the mime was built and bound to the handle
-    result<curl::Response, curl::Error> $first = $client->send(.postForm(std::env::file_url($path), $form));
+    result<curl::Response, curl::Error> $first = $client->send(.postForm(fileUrl($path), $form));
 
-    curl::Response $second = guard $client->send(.get(std::env::file_url($path))) else ($e) {
+    curl::Response $second = guard $client->send(.get(fileUrl($path))) else ($e) {
         die("the plain GET after a form failed: {$e}");
     }
 

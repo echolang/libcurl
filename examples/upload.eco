@@ -9,9 +9,9 @@ if (std::env::argc() > 1) {
     $url = std::env::argv()[1];
 }
 
-string $path = std::env::join(std::env::tmp(), 'libcurl_upload_example.txt');
+string $path = std::fs::join(std::env::tmp(), 'libcurl_upload_example.txt')->string();
 
-usize $written = guard std::io::writefile($path, 'the contents of a file on disk\n') else ($e) {
+usize $written = guard std::fs::writefile($path, 'the contents of a file on disk\n') else ($e) {
     die("could not write the fixture: {$e}");
 }
 
@@ -32,4 +32,4 @@ echo "dns {$res->timings->dns:.3f}s, connect {$res->timings->connect:.3f}s, tls 
 echo "first byte {$res->timings->firstByte:.3f}s, done {$res->seconds:.3f}s, {$res->redirects} redirects";
 echo $res->body;
 
-result<bool, std::io::ioerror> $gone = std::io::remove($path);
+result<bool, std::io::ioerror> $gone = std::fs::remove($path);

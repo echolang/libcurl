@@ -4,6 +4,7 @@
 
 #[module: "libcurl"]
 #[version: "1.0.0"] // x-release-please-version
+#[epm::echoc: ">=0.14.0"]
 
 // Windows `echoc test` / `run` native-link, so the archive can sit on the link line.
 // `name: "curl"` is the one `archive_in_search` looks up as `libcurl.lib` / `libcurl.a`.
