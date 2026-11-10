@@ -251,6 +251,17 @@ private function nulTerminated(const string& $text) : string
 }
 
 /**
+ * Appends one line to `$list` and answers the new head. libcurl copies the line. Null when it
+ * ran out of memory, and `$list` is untouched then.
+ */
+private function appendLine(ptr<curl_slist> $list, const string& $line) : ptr<curl_slist>
+{
+    string $owned = nulTerminated($line);
+
+    return cSlistAppend($list, $owned->cstr());
+}
+
+/**
  * Adds one part to a mime. Every setter copies what it's handed, so the strings here can
  * die as soon as it returns.
  *
@@ -349,6 +360,7 @@ public struct Easy
 {
     private ptr<CURL> $handle;
     private ptr<curl_slist> $slist;
+    private map<int32, ptr<curl_slist>> $lists;
     private ptr<curl_mime> $mime;
     private Flow $flow;
     private string $headBuf;
@@ -366,6 +378,7 @@ public struct Easy
 
         $this->handle = cEasyInit();
         $this->slist = null;
+        $this->lists = map<int32, ptr<curl_slist>>();
         $this->mime = null;
         $this->flow = Flow();
         $this->headBuf = '';
@@ -388,9 +401,7 @@ public struct Easy
             cEasyCleanup($this->handle);
         }
 
-        if ($this->slist != null) {
-            cSlistFree($this->slist);
-        }
+        $this->freeLists();
 
         if ($this->mime != null) {
             cMimeFree($this->mime);
@@ -548,8 +559,7 @@ public struct Easy
             return .error(.failedInit);
         }
 
-        string $owned = nulTerminated($line);
-        ptr<curl_slist> $grown = cSlistAppend($this->slist, $owned->cstr());
+        ptr<curl_slist> $grown = appendLine($this->slist, $line);
 
         if ($grown == null) {
             return .error(.outOfMemory);
@@ -559,6 +569,65 @@ public struct Easy
         $this->slist = $grown;
 
         return check(cSetopt($this->handle, OPT_HTTPHEADER, [$this->slist]));
+    }
+
+    #[docs::group: "Options"]
+    /**
+     * A list option: `setList(.mailRcpt, ['<a@example.com>'])`.
+     *
+     * The handle owns the list, one per option. Setting an option again frees the list it
+     * replaces, and an empty `$items` sets NULL, which is how a list option is undone.
+     */
+    function setList(ListOption $option, const array<string>& $items) : status<Error>
+    {
+        return $this->setRaw($option->value(), $items);
+    }
+
+    #[docs::group: "Options"]
+    /**
+     * A list option this library hasn't named, by number.
+     */
+    function setRaw(int32 $option, const array<string>& $items) : status<Error>
+    {
+        if ($this->handle == null) {
+            return .error(.failedInit);
+        }
+
+        ptr<curl_slist> $list = null;
+
+        foreach ($items as const &$item) {
+            ptr<curl_slist> $grown = appendLine($list, $item);
+
+            if ($grown == null) {
+                if ($list != null) {
+                    cSlistFree($list);
+                }
+
+                return .error(.outOfMemory);
+            }
+
+            $list = $grown;
+        }
+
+        guard check(cSetopt($this->handle, $option, [$list])) else ($e) {
+            // libcurl never took it
+            if ($list != null) {
+                cSlistFree($list);
+            }
+
+            return .error($e);
+        }
+
+        // libcurl reads the new list now, so the one it replaced can go
+        if ($this->lists->has($option)) {
+            cSlistFree($this->lists->take($option));
+        }
+
+        if ($list != null) {
+            $this->lists[$option] = $list;
+        }
+
+        return .ok;
     }
 
     #[docs::group: "Options"]
@@ -858,11 +927,7 @@ public struct Easy
         }
 
         cEasyReset($this->handle);
-
-        if ($this->slist != null) {
-            cSlistFree($this->slist);
-            $this->slist = null;
-        }
+        $this->freeLists();
 
         // the reset already let go of it, so this only frees
         if ($this->mime != null) {
@@ -875,6 +940,24 @@ public struct Easy
         $this->headBuf->clear();
 
         $this->setLong(.noSignal, 1);
+    }
+
+    /**
+     * Frees the headers and every list option. Only once libcurl can no longer read them: after
+     * a reset, or after the handle is gone.
+     */
+    private function freeLists() : void
+    {
+        if ($this->slist != null) {
+            cSlistFree($this->slist);
+            $this->slist = null;
+        }
+
+        foreach ($this->lists as const &$list) {
+            cSlistFree($list);
+        }
+
+        $this->lists->clear();
     }
 
     // ---- what came back -----------------------------------------------------------------------
@@ -1293,4 +1376,20 @@ test headers_and_forms_can_be_replaced_on_one_handle {
     assert(!$handle->setForm($second)->failed(), 'and another, which frees the first');
     assert(!$handle->clearString(.acceptEncoding)->failed(), 'a string option can be cleared');
     assert(!$handle->setBody('')->failed(), 'an empty body is a real body');
+}
+
+#[group: "unit"]
+test a_list_option_is_owned_replaced_and_undone {
+    Easy $handle = Easy();
+
+    assert(!$handle->setList(.mailRcpt, ['<a@example.com>', '<b@example.com>'])->failed(), 'a list');
+    assert(!$handle->setList(.mailRcpt, ['<c@example.com>'])->failed(), 'a second replaces it');
+    assert(!$handle->setList(.mailRcpt, [])->failed(), 'an empty one sets NULL');
+
+    $handle->reset();
+
+    assert(!$handle->setList(.mailRcpt, ['<d@example.com>'])->failed(), 'and after a reset');
+    assert(!$handle->setRaw(10187, ['<e@example.com>'])->failed(), 'or by number');
+    assert(!$handle->setString(.mailFrom, '<a@example.com>')->failed(), 'the sender is a named option');
+    assert(!$handle->setLong(.useSsl, UseSsl::all->value())->failed(), 'so is starttls');
 }

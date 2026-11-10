@@ -66,6 +66,12 @@ public enum Error : int32
     case couldNotConnect = 7;
 
     /**
+     * The server refused what was asked of it. For mail, a sender or recipient the server would not
+     * take. `CURLE_REMOTE_ACCESS_DENIED`.
+     */
+    case remoteAccessDenied = 9;
+
+    /**
      * A status of 400 or above, but only after `set(.failOnError, 1)`. Without it, that status
      * is a `Response`. `CURLE_HTTP_RETURNED_ERROR`.
      */
@@ -127,6 +133,16 @@ public enum Error : int32
     case unknownOption = 48;
 
     /**
+     * Sending on the connection failed. `CURLE_SEND_ERROR`.
+     */
+    case sendError = 55;
+
+    /**
+     * Receiving on the connection failed. `CURLE_RECV_ERROR`.
+     */
+    case recvError = 56;
+
+    /**
      * The server's certificate or hostname didn't check out. `caFile` is the fix for a private
      * CA. `CURLE_PEER_FAILED_VERIFICATION`.
      */
@@ -136,6 +152,16 @@ public enum Error : int32
      * The body passed the `maxBytes` cap. `CURLE_FILESIZE_EXCEEDED`.
      */
     case filesizeExceeded = 63;
+
+    /**
+     * TLS was required (`useSsl` at `.all`), and the server offered none. `CURLE_USE_SSL_FAILED`.
+     */
+    case useSslFailed = 64;
+
+    /**
+     * The server turned the username and password down. `CURLE_LOGIN_DENIED`.
+     */
+    case loginDenied = 67;
 
     /**
      * Any code this enum doesn't name: a newer libcurl, or a protocol this library doesn't

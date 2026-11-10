@@ -18,6 +18,7 @@ function otherCode(const curl::Error& $e) : int32
         curl::Error::couldNotResolveProxy => -1,
         curl::Error::couldNotResolveHost => -1,
         curl::Error::couldNotConnect => -1,
+        curl::Error::remoteAccessDenied => -1,
         curl::Error::httpReturnedError => -1,
         curl::Error::writeError => -1,
         curl::Error::readError => -1,
@@ -29,8 +30,12 @@ function otherCode(const curl::Error& $e) : int32
         curl::Error::badFunctionArgument => -1,
         curl::Error::tooManyRedirects => -1,
         curl::Error::unknownOption => -1,
+        curl::Error::sendError => -1,
+        curl::Error::recvError => -1,
         curl::Error::peerFailedVerification => -1,
         curl::Error::filesizeExceeded => -1,
+        curl::Error::useSslFailed => -1,
+        curl::Error::loginDenied => -1,
         curl::Error::other => $e->value(),
     };
 }
@@ -63,6 +68,7 @@ test every_named_case_is_its_curlcode {
     assert(curl::Error::from(5) == curl::Error::couldNotResolveProxy, 'CURLE_COULDNT_RESOLVE_PROXY');
     assert(curl::Error::from(6) == curl::Error::couldNotResolveHost, 'CURLE_COULDNT_RESOLVE_HOST');
     assert(curl::Error::from(7) == curl::Error::couldNotConnect, 'CURLE_COULDNT_CONNECT');
+    assert(curl::Error::from(9) == curl::Error::remoteAccessDenied, 'CURLE_REMOTE_ACCESS_DENIED');
     assert(curl::Error::from(22) == curl::Error::httpReturnedError, 'CURLE_HTTP_RETURNED_ERROR');
     assert(curl::Error::from(23) == curl::Error::writeError, 'CURLE_WRITE_ERROR');
     assert(curl::Error::from(26) == curl::Error::readError, 'CURLE_READ_ERROR');
@@ -74,8 +80,12 @@ test every_named_case_is_its_curlcode {
     assert(curl::Error::from(43) == curl::Error::badFunctionArgument, 'CURLE_BAD_FUNCTION_ARGUMENT');
     assert(curl::Error::from(47) == curl::Error::tooManyRedirects, 'CURLE_TOO_MANY_REDIRECTS');
     assert(curl::Error::from(48) == curl::Error::unknownOption, 'CURLE_UNKNOWN_OPTION');
+    assert(curl::Error::from(55) == curl::Error::sendError, 'CURLE_SEND_ERROR');
+    assert(curl::Error::from(56) == curl::Error::recvError, 'CURLE_RECV_ERROR');
     assert(curl::Error::from(60) == curl::Error::peerFailedVerification, 'CURLE_PEER_FAILED_VERIFICATION');
     assert(curl::Error::from(63) == curl::Error::filesizeExceeded, 'CURLE_FILESIZE_EXCEEDED');
+    assert(curl::Error::from(64) == curl::Error::useSslFailed, 'CURLE_USE_SSL_FAILED');
+    assert(curl::Error::from(67) == curl::Error::loginDenied, 'CURLE_LOGIN_DENIED');
 }
 
 #[group: "unit"]

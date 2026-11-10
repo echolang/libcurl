@@ -90,6 +90,13 @@ public enum LongOption : int32
     case noSignal = 99;
 
     /**
+     * Whether a mail (or other) connection goes over TLS after a plaintext start, as a `UseSsl`
+     * value: `setLong(.useSsl, UseSsl::all->value())` is STARTTLS or fail. An `smtps://` URL is TLS
+     * from the first byte and needs none of this. `CURLOPT_USE_SSL`.
+     */
+    case useSsl = 119;
+
+    /**
      * Which schemes `auth` credentials may use, as a `CURLAUTH_*` bitmask. Basic unless you say
      * otherwise. `CURLOPT_HTTPAUTH`.
      */
@@ -178,6 +185,21 @@ public enum StringOption : int32
     case password = 10174;
 
     /**
+     * The envelope sender of a mail, `<a@example.com>`. `CURLOPT_MAIL_FROM`.
+     */
+    case mailFrom = 10186;
+
+    /**
+     * The `AUTH=` address a mail is sent on behalf of. `CURLOPT_MAIL_AUTH`.
+     */
+    case mailAuth = 10217;
+
+    /**
+     * Login options for mail protocols, such as `AUTH=PLAIN`. `CURLOPT_LOGIN_OPTIONS`.
+     */
+    case loginOptions = 10224;
+
+    /**
      * Connects over this Unix domain socket instead of TCP. The URL's host still goes in the
      * `Host` header. `CURLOPT_UNIX_SOCKET_PATH`.
      */
@@ -206,6 +228,41 @@ public enum OffOption : int32
      */
     case postFieldSize = 30120;
 
+}
+
+/**
+ * Options whose value is a `curl_slist`, a list of strings. Written through `Easy::setList`.
+ *
+ * The request headers are one too, but `addHeader` owns that list, so it isn't named here.
+ */
+public enum ListOption : int32
+{
+    /**
+     * The envelope recipients of a mail, one `<a@example.com>` per item. `CURLOPT_MAIL_RCPT`.
+     */
+    case mailRcpt = 10187;
+
+}
+
+/**
+ * The values of `LongOption::useSsl`. `CURLUSESSL_*`.
+ */
+public enum UseSsl : int64
+{
+    /**
+     * Plaintext, whatever the server offers. `CURLUSESSL_NONE`.
+     */
+    case none = 0;
+
+    /**
+     * TLS when the server offers it, plaintext otherwise. `CURLUSESSL_TRY`.
+     */
+    case attempt = 1;
+
+    /**
+     * TLS or no transfer at all: `.useSslFailed` when the server offers none. `CURLUSESSL_ALL`.
+     */
+    case all = 3;
 }
 
 // curl encodes the C value type in the option number. `setRaw` reads this so an unnamed
@@ -404,6 +461,7 @@ test raw_options_remember_their_number {
 test option_numbers_carry_their_c_type {
     assert(LongOption::tcpKeepAlive->value() < 10000, 'a long is under the object range');
     assert(StringOption::url->value() >= 10000 && StringOption::url->value() < 20000, 'a string is an object');
+    assert(ListOption::mailRcpt->value() >= 10000 && ListOption::mailRcpt->value() < 20000, 'a list is an object');
     assert(OffOption::maxFileSize->value() >= CURLOPTTYPE_OFF_T && OffOption::postFieldSize->value() < CURLOPTTYPE_BLOB, 'an off_t is in its range');
     assert(OPT_WRITEFUNCTION >= 20000 && OPT_WRITEFUNCTION < CURLOPTTYPE_OFF_T, 'a function pointer is in its range');
 }
